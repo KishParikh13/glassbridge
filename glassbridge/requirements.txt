@@ -3,7 +3,7 @@ uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 anyio==4.7.0
 httpx==0.28.1
-anthropic==0.42.0
+anthropic>=0.49.0
 faster-whisper==1.1.0
 requests==2.32.3
 python-dotenv==1.0.1

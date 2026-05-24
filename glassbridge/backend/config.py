@@ -23,10 +23,16 @@ class Settings:
     host: str = "0.0.0.0"
     port: int = 8082
 
+    enable_web_search: bool = True
+    enable_local_tools: bool = True
+
     system_prompt: str = (
         "You are a helpful assistant the user talks to through smart glasses. "
         "Answer in 1-3 spoken sentences. Be direct and useful. "
-        "The image is what they're looking at right now. "
+        "The image is what they're looking at right now; if several frames are "
+        "provided they are recent views in time order (the last is current). "
+        "You can search the web and use tools when they would genuinely help; "
+        "otherwise just answer. "
         "Do not use markdown formatting (no asterisks, no bold, no bullets) — "
         "your reply will be spoken aloud and shown on a small screen."
     )
@@ -56,4 +62,13 @@ class Settings:
             ),
             port=int(os.environ.get("PORT", cls.port)),
             host=os.environ.get("HOST", cls.host),
+            enable_web_search=_env_bool("GB_WEB_SEARCH", cls.enable_web_search),
+            enable_local_tools=_env_bool("GB_LOCAL_TOOLS", cls.enable_local_tools),
         )
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
