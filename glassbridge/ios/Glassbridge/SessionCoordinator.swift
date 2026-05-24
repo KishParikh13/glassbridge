@@ -1,8 +1,15 @@
 import Foundation
 import SwiftUI
+import UIKit
+import AVFoundation
 
 @MainActor
 final class SessionCoordinator: ObservableObject {
+    enum Tab: Hashable {
+        case assistant
+        case camera
+    }
+
     enum Phase: Equatable {
         case idle
         case listening
@@ -37,6 +44,7 @@ final class SessionCoordinator: ObservableObject {
 
     // MARK: – Camera tab (direct glasses control, separate from the ASK flow)
 
+    @Published var selectedTab: Tab = .assistant
     @Published var capturedMedia: [CapturedMedia] = []
     @Published var isCapturingPhoto = false
     @Published var isRecordingVideo = false
@@ -104,6 +112,22 @@ final class SessionCoordinator: ObservableObject {
     #endif
 
     func askPressed() async {
+        await performAsk(presetImage: nil)
+    }
+
+    /// Run the full ASK pipeline using a still already in the gallery instead of a
+    /// fresh capture. For videos, a representative frame is extracted. Switches to
+    /// the Assistant tab so the transcript/reply are visible.
+    func askAboutMedia(_ media: CapturedMedia) async {
+        selectedTab = .assistant
+        guard let image = await Self.imageJPEG(from: media) else {
+            phase = .error("Couldn't get an image from that item.")
+            return
+        }
+        await performAsk(presetImage: image)
+    }
+
+    private func performAsk(presetImage: Data?) async {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
@@ -120,13 +144,23 @@ final class SessionCoordinator: ObservableObject {
             // is whatever AVAudioSession ended up with (BT route if available, else
             // iPhone built-in mic — both produce a WAV the backend can transcribe).
             let useGlasses = (glasses.status == .streaming)
-            captureSource = useGlasses ? "glasses + glasses-mic" : "iPhone camera + iPhone mic"
-
-            async let audioURL: URL = audio.record(seconds: AppConfig.recordSeconds)
-            async let photoData: Data = useGlasses
-                ? glasses.capturePhoto()
-                : iPhoneCapture.capturePhoto()
-            let (image, wav) = try await (photoData, audioURL)
+            let micLabel = useGlasses ? "glasses-mic" : "iPhone mic"
+            let image: Data
+            let wav: URL
+            if let presetImage {
+                captureSource = "captured media + \(micLabel)"
+                image = presetImage
+                wav = try await audio.record(seconds: AppConfig.recordSeconds)
+            } else {
+                captureSource = useGlasses ? "glasses + glasses-mic" : "iPhone camera + iPhone mic"
+                async let audioURL: URL = audio.record(seconds: AppConfig.recordSeconds)
+                async let photoData: Data = useGlasses
+                    ? glasses.capturePhoto()
+                    : iPhoneCapture.capturePhoto()
+                let (img, recorded) = try await (photoData, audioURL)
+                image = img
+                wav = recorded
+            }
 
             phase = .thinking
             let result = try await backend.ask(
@@ -226,5 +260,21 @@ final class SessionCoordinator: ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
         capturedMedia.removeAll()
+    }
+
+    /// Resolve a JPEG to send to Claude: a photo's own bytes, or a mid-clip frame
+    /// extracted from a video (the backend's vision call takes a single image).
+    private static func imageJPEG(from media: CapturedMedia) async -> Data? {
+        switch media.kind {
+        case .photo(let data):
+            return data
+        case .video(let url):
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            let time = CMTime(seconds: 0.5, preferredTimescale: 600)
+            guard let result = try? await generator.image(at: time) else { return nil }
+            return UIImage(cgImage: result.image).jpegData(compressionQuality: 0.7)
+        }
     }
 }

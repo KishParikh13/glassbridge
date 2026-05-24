@@ -36,7 +36,10 @@ struct CameraView: View {
                 }
             }
             .sheet(item: $selected) { media in
-                MediaDetailView(media: media)
+                MediaDetailView(media: media) { item in
+                    selected = nil
+                    Task { await coordinator.askAboutMedia(item) }
+                }
             }
         }
     }
@@ -214,29 +217,44 @@ private struct VideoThumbnail: View {
     }
 }
 
-/// Full-screen viewer: zoomable photo or an inline video player.
+/// Full-screen viewer: zoomable photo or an inline video player, plus a hand-off
+/// to the Claude ASK pipeline ("Ask about this").
 private struct MediaDetailView: View {
     let media: CapturedMedia
+    let onAsk: (CapturedMedia) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
-            Group {
-                switch media.kind {
-                case .photo(let data):
-                    if let image = UIImage(data: data) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(Color.black)
-                    } else {
-                        Text("Couldn't load image.").foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                Group {
+                    switch media.kind {
+                    case .photo(let data):
+                        if let image = UIImage(data: data) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color.black)
+                        } else {
+                            Text("Couldn't load image.").foregroundStyle(.secondary)
+                        }
+                    case .video(let url):
+                        VideoPlayer(player: AVPlayer(url: url))
                     }
-                case .video(let url):
-                    VideoPlayer(player: AVPlayer(url: url))
-                        .ignoresSafeArea(edges: .bottom)
                 }
+
+                Button {
+                    onAsk(media)
+                } label: {
+                    Label(media.isVideo ? "Ask Claude about this clip" : "Ask Claude about this",
+                          systemImage: "sparkles")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(16)
             }
             .navigationTitle("\(media.source.rawValue) · \(media.isVideo ? "Video" : "Photo")")
             .navigationBarTitleDisplayMode(.inline)

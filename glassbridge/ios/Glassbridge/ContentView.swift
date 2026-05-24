@@ -4,11 +4,13 @@ struct ContentView: View {
     @StateObject private var coordinator = SessionCoordinator()
 
     var body: some View {
-        TabView {
+        TabView(selection: $coordinator.selectedTab) {
             AssistantView(coordinator: coordinator)
                 .tabItem { Label("Assistant", systemImage: "sparkles") }
+                .tag(SessionCoordinator.Tab.assistant)
             CameraView(coordinator: coordinator)
                 .tabItem { Label("Camera", systemImage: "camera") }
+                .tag(SessionCoordinator.Tab.camera)
         }
     }
 }
