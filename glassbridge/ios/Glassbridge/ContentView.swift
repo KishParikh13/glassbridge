@@ -8,9 +8,12 @@ struct ContentView: View {
             AssistantView(coordinator: coordinator)
                 .tabItem { Label("Assistant", systemImage: "sparkles") }
                 .tag(SessionCoordinator.Tab.assistant)
-            CameraView(coordinator: coordinator)
+            CameraView(coordinator: coordinator, glasses: coordinator.glasses)
                 .tabItem { Label("Camera", systemImage: "camera") }
                 .tag(SessionCoordinator.Tab.camera)
+            DebugView(coordinator: coordinator, glasses: coordinator.glasses)
+                .tabItem { Label("Debug", systemImage: "ladybug") }
+                .tag(SessionCoordinator.Tab.debug)
         }
     }
 }

@@ -6,12 +6,15 @@ import AVKit
 /// video on demand and see the result load straight into an in-app gallery.
 struct CameraView: View {
     @ObservedObject var coordinator: SessionCoordinator
+    @ObservedObject var glasses: GlassesController
     @State private var selected: CapturedMedia?
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
+            VStack(spacing: 14) {
                 sourceChip
+                previewSection
+                qualityControls
                 controls
                 if let err = coordinator.captureError, !err.isEmpty {
                     Text(err)
@@ -45,6 +48,81 @@ struct CameraView: View {
     }
 
     // MARK: – Pieces
+
+    private var previewSection: some View {
+        VStack(spacing: 6) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12).fill(Color.black)
+                if let img = glasses.previewImage {
+                    Image(uiImage: img).resizable().scaledToFit()
+                } else {
+                    VStack(spacing: 6) {
+                        Image(systemName: glasses.previewEnabled ? "dot.radiowaves.left.and.right" : "eye.slash")
+                            .font(.title2)
+                            .foregroundStyle(.secondary)
+                        Text(previewHint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 16)
+                    }
+                }
+            }
+            .frame(height: 190)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+            HStack {
+                Toggle("Live preview", isOn: $glasses.previewEnabled)
+                    .toggleStyle(.switch)
+                    .font(.caption)
+                    .disabled(glasses.status != .streaming)
+                Spacer()
+                if glasses.status == .streaming {
+                    Text(String(format: "%.0f fps", glasses.measuredFPS))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    if !glasses.lastFrameSize.isEmpty {
+                        Text(glasses.lastFrameSize)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var previewHint: String {
+        if glasses.status != .streaming {
+            return "Live frames appear here once the glasses are streaming."
+        }
+        return glasses.previewEnabled ? "Waiting for frames…" : "Toggle Live preview to see the feed."
+    }
+
+    private var qualityControls: some View {
+        HStack(spacing: 10) {
+            Menu {
+                ForEach(GlassesController.Quality.allCases, id: \.self) { q in
+                    Button(q.label) {
+                        glasses.applyStreamSettings(quality: q, frameRate: glasses.frameRate)
+                    }
+                }
+            } label: {
+                Label(glasses.quality.label, systemImage: "rectangle.3.group")
+            }
+            Spacer()
+            Menu {
+                ForEach(GlassesController.frameRateOptions, id: \.self) { f in
+                    Button("\(f) fps") {
+                        glasses.applyStreamSettings(quality: glasses.quality, frameRate: f)
+                    }
+                }
+            } label: {
+                Label("\(glasses.frameRate) fps", systemImage: "speedometer")
+            }
+        }
+        .font(.caption)
+        .disabled(glasses.deviceId == nil)
+    }
 
     private var sourceChip: some View {
         HStack(spacing: 6) {

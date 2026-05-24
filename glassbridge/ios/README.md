@@ -90,11 +90,31 @@ Glassbridge/
 ├── VideoRecorder.swift       – glasses video frames (CMSampleBuffer) → .mp4 via AVAssetWriter
 ├── IPhoneVideoRecorder.swift – iPhone movie-capture fallback for the Camera tab
 ├── CapturedMedia.swift       – gallery item model (photo bytes or video URL)
-├── CameraView.swift          – direct-control UI: Photo/Record buttons + in-app gallery
+├── CameraView.swift          – Camera tab: live preview, quality, Photo/Record, gallery
+├── DebugView.swift           – Debug tab: connection, permissions, audio tests, event log
 ├── IPhoneCapture.swift       – iPhone photo-capture fallback
-├── AudioController.swift     – AVAudioSession HFP wiring, record, play
+├── AudioController.swift     – AVAudioSession HFP wiring, record, play, tone + mic meter
 └── BackendClient.swift       – multipart POST /ask, parses response headers
 ```
+
+## Debug tab (developer console)
+
+A personal tool for exercising every glasses control the DAT SDK exposes and
+seeing how well each works. All on one screen:
+
+- **Connection** — live status, device id, register / unregister.
+- **Permissions** — camera + microphone status; request either; refresh.
+- **Camera** — current quality/frame rate, *measured* FPS, last frame size, and
+  last photo-capture latency (ms). Adjust quality live from the Camera tab.
+- **Audio** — current route + available inputs, activate/deactivate the glasses
+  route, a **live mic level meter**, a **record→playback loopback** test, and a
+  **speaker test tone** — all without the backend, so you can isolate mic vs.
+  speaker vs. network.
+- **Event log** — merged DAT SDK + audio diagnostics, timestamped.
+
+The Camera tab also has a **Live preview** toggle that renders the glasses
+`videoFramePublisher` frames in real time (with an FPS readout) — the quickest
+way to confirm the stream is healthy.
 
 ## Camera tab (direct glasses control)
 

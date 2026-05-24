@@ -17,12 +17,34 @@ final class GlassesController: ObservableObject {
         case failed
     }
 
+    enum Quality: String, CaseIterable {
+        case low, medium, high
+        var label: String {
+            switch self {
+            case .low: return "Low · 360×640"
+            case .medium: return "Medium · 504×896"
+            case .high: return "High · 720×1280"
+            }
+        }
+    }
+    static let frameRateOptions = [2, 7, 15, 24, 30]
+
     @Published private(set) var status: Status = .unconfigured
     @Published private(set) var deviceId: String? = nil
     @Published private(set) var lastError: String? = nil
     @Published private(set) var debugLog: [String] = []
     @Published private(set) var cameraPermission: String = "unknown"
+    @Published private(set) var micPermission: String = "unknown"
     @Published private(set) var isRecording: Bool = false
+
+    // Live diagnostics for the Camera / Debug tabs.
+    @Published var previewEnabled = false
+    @Published private(set) var previewImage: UIImage?
+    @Published private(set) var measuredFPS: Double = 0
+    @Published private(set) var lastFrameSize: String = ""
+    @Published private(set) var lastPhotoLatencyMs: Int?
+    @Published private(set) var quality: Quality = .medium
+    @Published private(set) var frameRate: Int = 15
 
     private func log(_ s: String) {
         let stamp = ISO8601DateFormatter().string(from: Date()).suffix(8)
@@ -82,6 +104,54 @@ final class GlassesController: ObservableObject {
                     self.status = .failed
                     self.log("registration: ERROR \(error)")
                 }
+            }
+        }
+    }
+
+    /// Re-check camera + microphone permission status without triggering a request.
+    func refreshPermissions() {
+        guard GlassbridgeApp.wearablesConfigured else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            if let cam = try? await Wearables.shared.checkPermissionStatus(.camera) {
+                await MainActor.run { self.cameraPermission = "\(cam)" }
+            }
+            if let mic = try? await Wearables.shared.checkPermissionStatus(.microphone) {
+                await MainActor.run { self.micPermission = "\(mic)" }
+            }
+        }
+    }
+
+    func requestMicPermission() {
+        guard GlassbridgeApp.wearablesConfigured else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await MainActor.run { self.log("mic: requestPermission(.microphone)") }
+            if let result = try? await Wearables.shared.requestPermission(.microphone) {
+                await MainActor.run {
+                    self.micPermission = "\(result)"
+                    self.log("mic: result=\(result)")
+                }
+            }
+        }
+    }
+
+    /// Unregister the app from Meta AI (resets the pairing for testing).
+    func unregister() {
+        guard GlassbridgeApp.wearablesConfigured else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await MainActor.run { self.log("unregister: startUnregistration()") }
+            do {
+                try await Wearables.shared.startUnregistration()
+                await MainActor.run {
+                    self.teardownStream()
+                    self.deviceSession = nil
+                    self.status = .available
+                    self.log("unregister: ok")
+                }
+            } catch {
+                await MainActor.run { self.log("unregister: ERROR \(error)") }
             }
         }
     }
@@ -176,12 +246,27 @@ final class GlassesController: ObservableObject {
             let session = try Wearables.shared.createSession(deviceSelector: selector)
             try session.start()
             self.deviceSession = session
+            startStream()
+        } catch {
+            lastError = "createSession: \(error)"
+            status = .failed
+        }
+    }
 
-            let config = StreamConfiguration(
-                videoCodec: .raw,
-                resolution: .medium,
-                frameRate: 15
-            )
+    /// Build the camera stream on the current session using the selected
+    /// quality/frameRate and wire up its publishers.
+    private func startStream() {
+        guard let session = deviceSession, stream == nil else { return }
+        do {
+            let config: StreamConfiguration
+            switch quality {
+            case .low:
+                config = StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: frameRate)
+            case .medium:
+                config = StreamConfiguration(videoCodec: .raw, resolution: .medium, frameRate: frameRate)
+            case .high:
+                config = StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: frameRate)
+            }
             guard let stream = try session.addStream(config: config) else {
                 throw NSError(domain: "GlassesController", code: 10,
                               userInfo: [NSLocalizedDescriptionKey: "addStream returned nil"])
@@ -213,15 +298,63 @@ final class GlassesController: ObservableObject {
             }
             // Capture the recorder locally so the publisher thread never touches
             // MainActor-isolated `self`. The recorder ignores frames unless a
-            // recording is in progress, so the always-on listener is cheap.
+            // recording is in progress, so the always-on listener is cheap; the
+            // hop to `onVideoFrame` drives the live preview + FPS readout.
             let recorder = self.videoRecorder
-            self.videoFrameToken = stream.videoFramePublisher.listen { frame in
+            self.videoFrameToken = stream.videoFramePublisher.listen { [weak self] frame in
                 recorder.append(frame.sampleBuffer)
+                Task { @MainActor in self?.onVideoFrame(frame) }
             }
+            log("stream: \(quality.rawValue) @ \(frameRate)fps")
             Task { await stream.start() }
         } catch {
-            lastError = "createSession/addStream: \(error)"
+            lastError = "addStream: \(error)"
             status = .failed
+        }
+    }
+
+    private func teardownStream() {
+        stream?.stop()
+        stateToken = nil
+        photoToken = nil
+        errorToken = nil
+        videoFrameToken = nil
+        stream = nil
+        previewImage = nil
+        measuredFPS = 0
+    }
+
+    /// Apply new camera quality. If a session is live the stream is rebuilt;
+    /// otherwise the settings take effect when streaming next starts.
+    func applyStreamSettings(quality: Quality, frameRate: Int) {
+        self.quality = quality
+        self.frameRate = frameRate
+        guard deviceSession != nil else { return }
+        teardownStream()
+        status = .registered
+        startStream()
+    }
+
+    // MARK: – Live frame diagnostics
+
+    private var fpsWindowStart = Date()
+    private var fpsCount = 0
+    private var lastPreviewAt = Date.distantPast
+
+    private func onVideoFrame(_ frame: VideoFrame) {
+        fpsCount += 1
+        let now = Date()
+        let elapsed = now.timeIntervalSince(fpsWindowStart)
+        if elapsed >= 1.0 {
+            measuredFPS = Double(fpsCount) / elapsed
+            fpsCount = 0
+            fpsWindowStart = now
+        }
+        guard previewEnabled, now.timeIntervalSince(lastPreviewAt) > 0.1 else { return }
+        lastPreviewAt = now
+        if let image = frame.makeUIImage() {
+            previewImage = image
+            lastFrameSize = "\(Int(image.size.width))×\(Int(image.size.height))"
         }
     }
 
@@ -245,7 +378,8 @@ final class GlassesController: ObservableObject {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
 
-        return try await withCheckedThrowingContinuation { cont in
+        let t0 = Date()
+        let data: Data = try await withCheckedThrowingContinuation { cont in
             photoLock.lock()
             self.photoContinuation = cont
             photoLock.unlock()
@@ -265,10 +399,12 @@ final class GlassesController: ObservableObject {
                 )))
             }
         }
+        lastPhotoLatencyMs = Int(Date().timeIntervalSince(t0) * 1000)
+        return data
     }
 
     /// Begin recording the live glasses video feed to an .mp4. Frames are pulled
-    /// from `videoFramePublisher` (wired up in maybeStartDeviceSession).
+    /// from `videoFramePublisher` (wired up in startStream).
     func startVideoRecording() throws {
         guard stream != nil else {
             throw NSError(domain: "GlassesController", code: 21,

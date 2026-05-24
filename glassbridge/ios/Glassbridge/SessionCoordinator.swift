@@ -8,6 +8,7 @@ final class SessionCoordinator: ObservableObject {
     enum Tab: Hashable {
         case assistant
         case camera
+        case debug
     }
 
     enum Phase: Equatable {
@@ -260,6 +261,115 @@ final class SessionCoordinator: ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
         capturedMedia.removeAll()
+    }
+
+    // MARK: – Debug / diagnostics (audio + general)
+
+    @Published var audioRoute: String = ""
+    @Published var availableInputs: String = ""
+    @Published var micLevel: Float = 0
+    @Published var isMonitoringMic = false
+    @Published var isAudioBusy = false
+    @Published var diagLog: [String] = []
+
+    private func diag(_ s: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date()).suffix(8)
+        diagLog.append("\(stamp) \(s)")
+        if diagLog.count > 40 { diagLog.removeFirst(diagLog.count - 40) }
+    }
+
+    func clearDiagLog() { diagLog.removeAll() }
+
+    func refreshAudioRoute() {
+        audioRoute = audio.routeSummary()
+        availableInputs = audio.availableInputsSummary()
+    }
+
+    func activateAudioRoute() async {
+        do {
+            try await audio.activateForGlasses()
+            diag("audio route activated")
+        } catch {
+            diag("activate failed: \(error.localizedDescription)")
+        }
+        refreshAudioRoute()
+    }
+
+    func deactivateAudioRoute() {
+        audio.deactivate()
+        diag("audio route deactivated")
+        refreshAudioRoute()
+    }
+
+    /// Record from the mic, then immediately play it back — end-to-end mic+speaker
+    /// test that needs no backend.
+    func runMicLoopback(seconds: Double) async {
+        guard !isAudioBusy, !isMonitoringMic else { return }
+        isAudioBusy = true
+        defer { isAudioBusy = false }
+        do {
+            try await audio.activateForGlasses()
+            refreshAudioRoute()
+            diag("loopback: recording \(Int(seconds))s")
+            let url = try await audio.record(seconds: seconds)
+            let bytes = (try? Data(contentsOf: url).count) ?? 0
+            diag("loopback: \(bytes) bytes — playing back")
+            try await audio.play(fileURL: url)
+            diag("loopback: done")
+        } catch {
+            diag("loopback failed: \(error.localizedDescription)")
+        }
+        audio.deactivate()
+    }
+
+    func playSpeakerTone() async {
+        guard !isAudioBusy, !isMonitoringMic else { return }
+        isAudioBusy = true
+        defer { isAudioBusy = false }
+        do {
+            try await audio.activateForGlasses()
+            refreshAudioRoute()
+            diag("tone: 880Hz 1s")
+            try await audio.playTestTone()
+            diag("tone: done")
+        } catch {
+            diag("tone failed: \(error.localizedDescription)")
+        }
+        audio.deactivate()
+    }
+
+    func toggleMicMeter() async {
+        if isMonitoringMic {
+            stopMicMeter()
+        } else {
+            await startMicMeter()
+        }
+    }
+
+    private func startMicMeter() async {
+        guard !isAudioBusy, !isMonitoringMic else { return }
+        do {
+            try await audio.activateForGlasses()
+            refreshAudioRoute()
+            try audio.startMicMonitor()
+            isMonitoringMic = true
+            diag("mic meter: started")
+            while isMonitoringMic {
+                micLevel = audio.micLevel()
+                try? await Task.sleep(nanoseconds: 60_000_000)
+            }
+        } catch {
+            diag("mic meter failed: \(error.localizedDescription)")
+            isMonitoringMic = false
+        }
+    }
+
+    private func stopMicMeter() {
+        isMonitoringMic = false
+        audio.stopMicMonitor()
+        audio.deactivate()
+        micLevel = 0
+        diag("mic meter: stopped")
     }
 
     /// Resolve a JPEG to send to Claude: a photo's own bytes, or a mid-clip frame
