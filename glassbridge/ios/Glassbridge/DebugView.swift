@@ -6,12 +6,14 @@ import SwiftUI
 struct DebugView: View {
     @ObservedObject var coordinator: SessionCoordinator
     @ObservedObject var glasses: GlassesController
+    @ObservedObject var wake: WakeWordListener
     @State private var loopbackSeconds: Double = 3
 
     var body: some View {
         NavigationStack {
             Form {
                 connectionSection
+                handsFreeSection
                 permissionsSection
                 cameraSection
                 audioSection
@@ -37,6 +39,31 @@ struct DebugView: View {
             Button("Pair / register glasses") { glasses.register() }
             Button("Unregister") { glasses.unregister() }
                 .foregroundStyle(.orange)
+        }
+    }
+
+    // MARK: – Hands-free
+
+    private var handsFreeSection: some View {
+        Section("Hands-free") {
+            Toggle(isOn: Binding(
+                get: { coordinator.wakeWordEnabled },
+                set: { coordinator.setWakeWord($0) }
+            )) {
+                Text("Wake word \u{201C}\(wake.triggerPhrase)\u{201D}")
+            }
+            LabeledContent("Listener", value: wake.state.rawValue)
+            if coordinator.wakeWordEnabled && !wake.lastHeard.isEmpty {
+                LabeledContent("Heard") {
+                    Text(wake.lastHeard)
+                        .font(.system(.caption2, design: .monospaced))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.trailing)
+                }
+            }
+            Text("Listens on-device and starts an ASK when it hears the phrase. Shows a Live Activity on the lock screen while on.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 

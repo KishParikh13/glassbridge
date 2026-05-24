@@ -90,12 +90,35 @@ Glassbridge/
 ├── VideoRecorder.swift       – glasses video frames (CMSampleBuffer) → .mp4 via AVAssetWriter
 ├── IPhoneVideoRecorder.swift – iPhone movie-capture fallback for the Camera tab
 ├── CapturedMedia.swift       – gallery item model (photo bytes or video URL)
-├── CameraView.swift          – Camera tab: live preview, quality, Photo/Record, gallery
-├── DebugView.swift           – Debug tab: connection, permissions, audio tests, event log
+├── CameraView.swift          – Camera tab: live preview, quality, rolling context, gallery
+├── DebugView.swift           – Debug tab: connection, hands-free, permissions, audio, log
+├── WakeWordListener.swift    – on-device "hey glass" wake word (Apple Speech)
+├── LiveActivityController.swift – ActivityKit wrapper (lock-screen / Dynamic Island)
+├── GlassbridgeActivityAttributes.swift – Live Activity model (shared with widget)
 ├── IPhoneCapture.swift       – iPhone photo-capture fallback
 ├── AudioController.swift     – AVAudioSession HFP wiring, record, play, tone + mic meter
-└── BackendClient.swift       – multipart POST /ask, parses response headers
+└── BackendClient.swift       – multipart POST /ask (+ context frames), parses headers
+
+GlassbridgeWidgets/           – Widget extension target (Live Activity UI)
+├── GlassbridgeWidgetsBundle.swift
+└── GlassbridgeLiveActivity.swift
 ```
+
+## Hands-free, live context, and tools (later additions)
+
+- **Rolling context (Camera tab toggle)** — while on, recent glasses frames are
+  kept and attached to your next ASK so Claude has temporal awareness ("what
+  changed?"). Silent; never auto-speaks. Glasses-only (needs the video stream).
+- **Wake word "hey glass" (Hands-free toggle / Debug tab)** — continuous
+  *on-device* speech recognition (Apple Speech) that fires an ASK when it hears
+  the phrase, so you can ask with the phone pocketed. Needs Speech permission.
+- **Live Activity** — while hands-free is on, assistant state (Listening /
+  Thinking / Speaking) shows on the lock screen and Dynamic Island. Requires the
+  `GlassbridgeWidgetsExtension` target (added in `project.yml`) — re-run
+  `xcodegen generate` and it appears automatically.
+- **Backend tools** — the backend gives Claude an agentic tool loop: Anthropic's
+  hosted `web_search` plus local `get_datetime` / `save_note` / `recall_notes`.
+  Toggle via `GB_WEB_SEARCH` / `GB_LOCAL_TOOLS`; needs `anthropic>=0.49`.
 
 ## Debug tab (developer console)
 

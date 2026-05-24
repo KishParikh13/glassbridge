@@ -88,6 +88,18 @@ struct CameraView: View {
                     }
                 }
             }
+            HStack {
+                Toggle("Rolling context", isOn: $glasses.contextCaptureEnabled)
+                    .toggleStyle(.switch)
+                    .font(.caption)
+                    .disabled(glasses.status != .streaming)
+                Spacer()
+                if glasses.contextCaptureEnabled {
+                    Text("\(glasses.contextFrameCount) frames")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 

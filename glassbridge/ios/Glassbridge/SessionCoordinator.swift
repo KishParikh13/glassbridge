@@ -29,17 +29,23 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
-    @Published var phase: Phase = .idle
+    @Published var phase: Phase = .idle {
+        didSet { syncLiveActivity() }
+    }
     @Published var transcript: String = ""
     @Published var reply: String = ""
     @Published var latencySummary: String = ""
 
     let glasses = GlassesController()
+    let wake = WakeWordListener()
     private let audio = AudioController()
     private let backend = BackendClient()
     private let iPhoneCapture = IPhoneCapture()
     private let iPhoneVideo = IPhoneVideoRecorder()
+    private let liveActivity = LiveActivityController()
     private var isBusy = false
+
+    @Published var wakeWordEnabled = false
 
     @Published var captureSource: String = "auto"
 
@@ -131,7 +137,13 @@ final class SessionCoordinator: ObservableObject {
     private func performAsk(presetImage: Data?) async {
         guard !isBusy else { return }
         isBusy = true
-        defer { isBusy = false }
+        // Free the mic from the wake-word listener while we record, and hand it
+        // back when done. Covers both manual ASK and wake-triggered ASK.
+        if wakeWordEnabled { wake.pause() }
+        defer {
+            isBusy = false
+            if wakeWordEnabled { wake.resume() }
+        }
 
         transcript = ""
         reply = ""
@@ -163,17 +175,34 @@ final class SessionCoordinator: ObservableObject {
                 wav = recorded
             }
 
+            // Live rolling context (#1): attach recent glasses frames so Claude has
+            // temporal awareness. Only on fresh captures (not gallery hand-offs).
+            let contextFrames: [Data] = (presetImage == nil && useGlasses && glasses.contextCaptureEnabled)
+                ? glasses.recentContextFrames()
+                : []
+
             phase = .thinking
             let result = try await backend.ask(
                 audioURL: wav,
                 imageJPEG: image,
+                contextFramesJPEG: contextFrames,
                 sessionId: AppConfig.sessionId
             )
             transcript = result.transcript ?? ""
             reply = result.reply ?? ""
+            var summary = ""
             if let stt = result.sttLatency, let llm = result.llmLatency {
-                latencySummary = String(format: "stt %.2fs · llm %.2fs", stt, llm)
+                summary = String(format: "stt %.2fs · llm %.2fs", stt, llm)
             }
+            if !contextFrames.isEmpty {
+                summary += summary.isEmpty ? "" : " · "
+                summary += "\(contextFrames.count) ctx frames"
+            }
+            if let tools = result.tools, !tools.isEmpty {
+                summary += summary.isEmpty ? "" : " · "
+                summary += "tools: \(tools)"
+            }
+            latencySummary = summary
 
             phase = .speaking
             try await audio.play(mp3: result.mp3)
@@ -261,6 +290,41 @@ final class SessionCoordinator: ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
         capturedMedia.removeAll()
+    }
+
+    // MARK: – Hands-free (#3 wake word + #6 Live Activity)
+
+    func setWakeWord(_ on: Bool) {
+        wakeWordEnabled = on
+        if on {
+            wake.onWake = { [weak self] in
+                Task { await self?.askPressed() }
+            }
+            wake.start()
+            liveActivity.start(status: "Ready", detail: "Say \u{201C}\(wake.triggerPhrase)\u{201D}")
+        } else {
+            wake.stop()
+            liveActivity.end()
+        }
+    }
+
+    private func syncLiveActivity() {
+        guard wakeWordEnabled else { return }
+        let status: String
+        switch phase {
+        case .idle: status = "Ready"
+        case .listening: status = "Listening"
+        case .thinking: status = "Thinking"
+        case .speaking: status = "Speaking"
+        case .error: status = "Error"
+        }
+        let detail: String
+        switch phase {
+        case .idle: detail = "Say \u{201C}\(wake.triggerPhrase)\u{201D}"
+        case .error(let msg): detail = msg
+        default: detail = ""
+        }
+        liveActivity.update(status: status, detail: detail)
     }
 
     // MARK: – Debug / diagnostics (audio + general)

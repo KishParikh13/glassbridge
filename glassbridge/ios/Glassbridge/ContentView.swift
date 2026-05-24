@@ -11,7 +11,7 @@ struct ContentView: View {
             CameraView(coordinator: coordinator, glasses: coordinator.glasses)
                 .tabItem { Label("Camera", systemImage: "camera") }
                 .tag(SessionCoordinator.Tab.camera)
-            DebugView(coordinator: coordinator, glasses: coordinator.glasses)
+            DebugView(coordinator: coordinator, glasses: coordinator.glasses, wake: coordinator.wake)
                 .tabItem { Label("Debug", systemImage: "ladybug") }
                 .tag(SessionCoordinator.Tab.debug)
         }
@@ -153,6 +153,15 @@ struct AssistantView: View {
 
     private var footer: some View {
         HStack {
+            Toggle(isOn: Binding(
+                get: { coordinator.wakeWordEnabled },
+                set: { coordinator.setWakeWord($0) }
+            )) {
+                Label("Hands-free", systemImage: coordinator.wakeWordEnabled ? "mic.fill" : "mic")
+                    .font(.caption)
+            }
+            .toggleStyle(.button)
+            .tint(coordinator.wakeWordEnabled ? .red : .secondary)
             Spacer()
             Button {
                 showAdvanced = true

@@ -46,6 +46,11 @@ final class GlassesController: ObservableObject {
     @Published private(set) var quality: Quality = .medium
     @Published private(set) var frameRate: Int = 15
 
+    // Live "rolling context" (#1): when on, recent frames are kept so the next
+    // ASK can be sent with temporal awareness. Never auto-speaks.
+    @Published var contextCaptureEnabled = false
+    @Published private(set) var contextFrameCount = 0
+
     private func log(_ s: String) {
         let stamp = ISO8601DateFormatter().string(from: Date()).suffix(8)
         debugLog.append("\(stamp) \(s)")
@@ -340,6 +345,10 @@ final class GlassesController: ObservableObject {
     private var fpsWindowStart = Date()
     private var fpsCount = 0
     private var lastPreviewAt = Date.distantPast
+    private var contextFrames: [Data] = []
+    private var lastContextAt = Date.distantPast
+    private let contextMaxFrames = 4
+    private let contextIntervalSec: TimeInterval = 1.5
 
     private func onVideoFrame(_ frame: VideoFrame) {
         fpsCount += 1
@@ -350,12 +359,49 @@ final class GlassesController: ObservableObject {
             fpsCount = 0
             fpsWindowStart = now
         }
-        guard previewEnabled, now.timeIntervalSince(lastPreviewAt) > 0.1 else { return }
-        lastPreviewAt = now
-        if let image = frame.makeUIImage() {
+
+        let wantPreview = previewEnabled && now.timeIntervalSince(lastPreviewAt) > 0.1
+        let wantContext = contextCaptureEnabled && now.timeIntervalSince(lastContextAt) > contextIntervalSec
+        guard wantPreview || wantContext else { return }
+        guard let image = frame.makeUIImage() else { return }
+
+        if wantPreview {
+            lastPreviewAt = now
             previewImage = image
             lastFrameSize = "\(Int(image.size.width))×\(Int(image.size.height))"
         }
+        if wantContext {
+            lastContextAt = now
+            if let jpeg = Self.contextJPEG(image) {
+                contextFrames.append(jpeg)
+                if contextFrames.count > contextMaxFrames {
+                    contextFrames.removeFirst(contextFrames.count - contextMaxFrames)
+                }
+                contextFrameCount = contextFrames.count
+            }
+        }
+    }
+
+    /// Snapshot of the rolling context frames (oldest→newest) to attach to an ASK.
+    func recentContextFrames() -> [Data] { contextFrames }
+
+    func clearContextFrames() {
+        contextFrames.removeAll()
+        contextFrameCount = 0
+    }
+
+    private static func contextJPEG(_ image: UIImage, maxDim: CGFloat = 640, quality: CGFloat = 0.5) -> Data? {
+        let longEdge = max(image.size.width, image.size.height)
+        guard longEdge > maxDim else { return image.jpegData(compressionQuality: quality) }
+        let scale = maxDim / longEdge
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1
+        fmt.opaque = true
+        let resized = UIGraphicsImageRenderer(size: size, format: fmt).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return resized.jpegData(compressionQuality: quality)
     }
 
     /// Capture one JPEG from the glasses, blocking up to `timeout` seconds.
