@@ -82,14 +82,36 @@ Force-quit + relaunch to start a fresh conversation.
 
 ```
 Glassbridge/
-├── GlassbridgeApp.swift     – @main, Wearables.configure(), URL handler
-├── ContentView.swift        – the single ASK button screen
-├── Config.swift             – backend URL + record duration + session id
-├── SessionCoordinator.swift – orchestrates the ASK flow + @Published phase
-├── GlassesController.swift  – DAT registration, DeviceSession, Stream, capturePhoto
-├── AudioController.swift    – AVAudioSession HFP wiring, record, play
-└── BackendClient.swift      – multipart POST /ask, parses response headers
+├── GlassbridgeApp.swift      – @main, Wearables.configure(), URL handler
+├── ContentView.swift         – TabView root: Assistant (ASK) + Camera tabs
+├── Config.swift              – backend URL + record duration + session id
+├── SessionCoordinator.swift  – orchestrates ASK flow + direct camera control
+├── GlassesController.swift   – DAT registration, DeviceSession, Stream, capturePhoto + video recording
+├── VideoRecorder.swift       – glasses video frames (CMSampleBuffer) → .mp4 via AVAssetWriter
+├── IPhoneVideoRecorder.swift – iPhone movie-capture fallback for the Camera tab
+├── CapturedMedia.swift       – gallery item model (photo bytes or video URL)
+├── CameraView.swift          – direct-control UI: Photo/Record buttons + in-app gallery
+├── IPhoneCapture.swift       – iPhone photo-capture fallback
+├── AudioController.swift     – AVAudioSession HFP wiring, record, play
+└── BackendClient.swift       – multipart POST /ask, parses response headers
 ```
+
+## Camera tab (direct glasses control)
+
+Separate from the ASK/AI flow, the **Camera** tab lets you drive the glasses
+directly:
+
+- **Photo** — snaps one still and loads it straight into the in-app gallery.
+- **Record** — toggles video recording; the finished clip lands in the gallery,
+  tappable for inline playback.
+
+Source follows the same rule as ASK: it uses the **Ray-Ban glasses** when the
+stream is live (`status: streaming`), and falls back to the **iPhone camera + mic**
+otherwise — so the tab is fully usable before glasses pairing works. Glasses
+video is built from the DAT `videoFramePublisher` frames, encoded to H.264 .mp4.
+
+> Added files (VideoRecorder, IPhoneVideoRecorder, CapturedMedia, CameraView)
+> are picked up automatically on the next `xcodegen generate`.
 
 ## Why not the simulator?
 

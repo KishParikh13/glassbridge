@@ -2,6 +2,19 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var coordinator = SessionCoordinator()
+
+    var body: some View {
+        TabView {
+            AssistantView(coordinator: coordinator)
+                .tabItem { Label("Assistant", systemImage: "sparkles") }
+            CameraView(coordinator: coordinator)
+                .tabItem { Label("Camera", systemImage: "camera") }
+        }
+    }
+}
+
+struct AssistantView: View {
+    @ObservedObject var coordinator: SessionCoordinator
     @State private var showAdvanced = false
 
     var body: some View {

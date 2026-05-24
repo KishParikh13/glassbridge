@@ -30,9 +30,21 @@ final class SessionCoordinator: ObservableObject {
     private let audio = AudioController()
     private let backend = BackendClient()
     private let iPhoneCapture = IPhoneCapture()
+    private let iPhoneVideo = IPhoneVideoRecorder()
     private var isBusy = false
 
     @Published var captureSource: String = "auto"
+
+    // MARK: – Camera tab (direct glasses control, separate from the ASK flow)
+
+    @Published var capturedMedia: [CapturedMedia] = []
+    @Published var isCapturingPhoto = false
+    @Published var isRecordingVideo = false
+    @Published var captureError: String?
+    private var recordingSource: CapturedMedia.Source = .iPhone
+
+    /// True when glasses are live; otherwise the Camera tab falls back to the iPhone.
+    var cameraUsesGlasses: Bool { glasses.status == .streaming }
 
     init() {
         glasses.start()
@@ -137,5 +149,82 @@ final class SessionCoordinator: ObservableObject {
         }
 
         audio.deactivate()
+    }
+
+    // MARK: – Direct camera control
+
+    /// Snap one still — from the glasses when streaming, else the iPhone camera —
+    /// and prepend it to the in-app gallery.
+    func takePhotoDirect() async {
+        guard !isCapturingPhoto, !isRecordingVideo else { return }
+        isCapturingPhoto = true
+        captureError = nil
+        defer { isCapturingPhoto = false }
+
+        let useGlasses = cameraUsesGlasses
+        do {
+            let data: Data
+            if useGlasses {
+                data = try await glasses.capturePhoto()
+            } else {
+                data = try await iPhoneCapture.capturePhoto()
+            }
+            capturedMedia.insert(
+                CapturedMedia(kind: .photo(data),
+                              source: useGlasses ? .glasses : .iPhone,
+                              date: Date()),
+                at: 0)
+        } catch {
+            captureError = error.localizedDescription
+        }
+    }
+
+    func toggleVideoRecording() async {
+        if isRecordingVideo {
+            await stopVideoRecording()
+        } else {
+            await startVideoRecording()
+        }
+    }
+
+    private func startVideoRecording() async {
+        guard !isCapturingPhoto, !isRecordingVideo else { return }
+        captureError = nil
+        let useGlasses = cameraUsesGlasses
+        do {
+            if useGlasses {
+                try glasses.startVideoRecording()
+            } else {
+                try await iPhoneVideo.start()
+            }
+            recordingSource = useGlasses ? .glasses : .iPhone
+            isRecordingVideo = true
+        } catch {
+            captureError = error.localizedDescription
+        }
+    }
+
+    private func stopVideoRecording() async {
+        isRecordingVideo = false
+        do {
+            let url: URL
+            switch recordingSource {
+            case .glasses: url = try await glasses.stopVideoRecording()
+            case .iPhone:  url = try await iPhoneVideo.stop()
+            }
+            capturedMedia.insert(
+                CapturedMedia(kind: .video(url), source: recordingSource, date: Date()),
+                at: 0)
+        } catch {
+            captureError = error.localizedDescription
+        }
+    }
+
+    /// Clear the gallery and remove any backing video files from disk.
+    func clearCapturedMedia() {
+        for url in capturedMedia.compactMap(\.videoURL) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        capturedMedia.removeAll()
     }
 }

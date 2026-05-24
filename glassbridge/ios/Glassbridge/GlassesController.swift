@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import CoreMedia
 import MWDATCore
 import MWDATCamera
 
@@ -21,6 +22,7 @@ final class GlassesController: ObservableObject {
     @Published private(set) var lastError: String? = nil
     @Published private(set) var debugLog: [String] = []
     @Published private(set) var cameraPermission: String = "unknown"
+    @Published private(set) var isRecording: Bool = false
 
     private func log(_ s: String) {
         let stamp = ISO8601DateFormatter().string(from: Date()).suffix(8)
@@ -34,6 +36,8 @@ final class GlassesController: ObservableObject {
     private var stateToken: (any AnyListenerToken)?
     private var photoToken: (any AnyListenerToken)?
     private var errorToken: (any AnyListenerToken)?
+    private var videoFrameToken: (any AnyListenerToken)?
+    private let videoRecorder = VideoRecorder()
 
     private var photoContinuation: CheckedContinuation<Data, Error>? = nil
     private let photoLock = NSLock()
@@ -207,6 +211,13 @@ final class GlassesController: ObservableObject {
                     self?.lastError = "stream error: \(err)"
                 }
             }
+            // Capture the recorder locally so the publisher thread never touches
+            // MainActor-isolated `self`. The recorder ignores frames unless a
+            // recording is in progress, so the always-on listener is cheap.
+            let recorder = self.videoRecorder
+            self.videoFrameToken = stream.videoFramePublisher.listen { frame in
+                recorder.append(frame.sampleBuffer)
+            }
             Task { await stream.start() }
         } catch {
             lastError = "createSession/addStream: \(error)"
@@ -254,6 +265,31 @@ final class GlassesController: ObservableObject {
                 )))
             }
         }
+    }
+
+    /// Begin recording the live glasses video feed to an .mp4. Frames are pulled
+    /// from `videoFramePublisher` (wired up in maybeStartDeviceSession).
+    func startVideoRecording() throws {
+        guard stream != nil else {
+            throw NSError(domain: "GlassesController", code: 21,
+                          userInfo: [NSLocalizedDescriptionKey: "Stream not initialized. Pair your glasses first."])
+        }
+        guard status == .streaming else {
+            throw NSError(domain: "GlassesController", code: 22,
+                          userInfo: [NSLocalizedDescriptionKey: "Glasses not streaming (status=\(status.rawValue))."])
+        }
+        videoRecorder.start()
+        isRecording = true
+    }
+
+    /// Stop recording and return the finished .mp4 URL.
+    func stopVideoRecording() async throws -> URL {
+        isRecording = false
+        guard let url = await videoRecorder.finish() else {
+            throw NSError(domain: "GlassesController", code: 23,
+                          userInfo: [NSLocalizedDescriptionKey: "No video was recorded."])
+        }
+        return url
     }
 
     private func deliverPhoto(_ result: Result<Data, Error>) {
