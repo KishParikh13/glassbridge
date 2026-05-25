@@ -8,7 +8,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    DEVELOPMENT_TEAM: "" # Set to your Apple Developer Team ID (10 chars). See docs/LEARNINGS.md §2 for how to find it.
+    DEVELOPMENT_TEAM: "GN3TH9WD6W" # Apple Developer Team ID. See docs/LEARNINGS.md §2.
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
@@ -56,7 +56,7 @@ targets:
         MWDAT:
           AppLinkURLScheme: "glassbridge://"
           MetaAppID: "0"        # "0" = dev mode. For production: get from Wearables Developer Center.
-          TeamID: ""            # Set to your Apple Developer Team ID, same as DEVELOPMENT_TEAM above.
+          TeamID: "GN3TH9WD6W"  # Apple Developer Team ID, same as DEVELOPMENT_TEAM above.
           Analytics:
             OptOut: true
         NSAppTransportSecurity:

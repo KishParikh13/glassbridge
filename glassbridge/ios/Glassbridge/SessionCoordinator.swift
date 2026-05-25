@@ -6,9 +6,9 @@ import AVFoundation
 @MainActor
 final class SessionCoordinator: ObservableObject {
     enum Tab: Hashable {
-        case assistant
-        case camera
-        case debug
+        case live
+        case setup
+        case more
     }
 
     enum Phase: Equatable {
@@ -46,32 +46,84 @@ final class SessionCoordinator: ObservableObject {
     private var isBusy = false
 
     @Published var wakeWordEnabled = false
-
     @Published var captureSource: String = "auto"
+    @Published var selectedTab: Tab = .live
 
-    // MARK: – Camera tab (direct glasses control, separate from the ASK flow)
+    // MARK: – Onboarding + permissions + backend (Setup tab)
 
-    @Published var selectedTab: Tab = .assistant
+    private let onboardingKey = "gb.hasCompletedOnboarding"
+    @Published var hasCompletedOnboarding: Bool
+    @Published var micPermission: PermStatus = .undetermined
+    @Published var cameraPermission: PermStatus = .undetermined
+    @Published var speechPermission: PermStatus = .undetermined
+    @Published var backendHealth: BackendHealth.Result?
+    @Published var isCheckingBackend = false
+
+    // MARK: – Camera gallery (direct capture, shown on Live)
+
     @Published var capturedMedia: [CapturedMedia] = []
     @Published var isCapturingPhoto = false
     @Published var isRecordingVideo = false
     @Published var captureError: String?
     private var recordingSource: CapturedMedia.Source = .iPhone
 
-    /// True when glasses are live; otherwise the Camera tab falls back to the iPhone.
-    var cameraUsesGlasses: Bool { glasses.status == .streaming }
+    /// True when glasses are live; otherwise capture falls back to the iPhone.
+    var cameraUsesGlasses: Bool { glasses.isStreaming }
 
     init() {
+        hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "gb.hasCompletedOnboarding")
         glasses.start()
+        refreshPermissionStatuses()
+        if !hasCompletedOnboarding { selectedTab = .setup }
         #if DEBUG
         maybeRunAutomatedTestAtLaunch()
         #endif
     }
 
+    // MARK: – Onboarding / permissions / backend
+
+    func completeOnboarding() {
+        hasCompletedOnboarding = true
+        UserDefaults.standard.set(true, forKey: onboardingKey)
+        selectedTab = .live
+    }
+
+    func restartOnboarding() {
+        hasCompletedOnboarding = false
+        UserDefaults.standard.set(false, forKey: onboardingKey)
+        selectedTab = .setup
+    }
+
+    func refreshPermissionStatuses() {
+        micPermission = PermissionsService.microphoneStatus()
+        cameraPermission = PermissionsService.cameraStatus()
+        speechPermission = PermissionsService.speechStatus()
+    }
+
+    func requestMic() async { micPermission = await PermissionsService.requestMicrophone() }
+    func requestCamera() async { cameraPermission = await PermissionsService.requestCamera() }
+    func requestSpeech() async { speechPermission = await PermissionsService.requestSpeech() }
+
+    func checkBackend() async {
+        isCheckingBackend = true
+        defer { isCheckingBackend = false }
+        backendHealth = await BackendHealth.check()
+    }
+
+    /// The single source of truth for "what works and what it's connected to."
+    func capabilities() -> [Capability] {
+        Capability.all(
+            connection: glasses.connectionState,
+            micGranted: micPermission.isGranted,
+            cameraGranted: cameraPermission.isGranted,
+            speechGranted: speechPermission.isGranted,
+            backendReachable: backendHealth?.reachable ?? false
+        )
+    }
+
     #if DEBUG
-    /// When launched with GB_AUTO_TEST=1 in the env, fire a self-contained test ASK
-    /// using a stub silent WAV + the captured photo, with text_override bypassing
-    /// Whisper. Result lands in the backend log so we can verify the pipeline end-to-end.
+    /// When launched with GB_AUTO_TEST=1 (or --gb-auto-test), fire a self-contained
+    /// test ASK using a stub image + silent wav + text_override (bypasses Whisper).
     private func maybeRunAutomatedTestAtLaunch() {
         let envHit = ProcessInfo.processInfo.environment["GB_AUTO_TEST"] == "1"
         let argHit = ProcessInfo.processInfo.arguments.contains("--gb-auto-test")
@@ -90,8 +142,6 @@ final class SessionCoordinator: ObservableObject {
         do {
             phase = .listening
             captureSource = "automated test (stub image + silent wav + text_override)"
-            // Bypass glasses/iPhone capture entirely — use the stub image MockSetup
-            // produced. Works regardless of whether Wearables.shared is usable.
             guard let image = MockSetup.stubImageData(), !image.isEmpty else {
                 phase = .error("test: no stub image"); return
             }
@@ -122,11 +172,10 @@ final class SessionCoordinator: ObservableObject {
         await performAsk(presetImage: nil)
     }
 
-    /// Run the full ASK pipeline using a still already in the gallery instead of a
-    /// fresh capture. For videos, a representative frame is extracted. Switches to
-    /// the Assistant tab so the transcript/reply are visible.
+    /// Run the ASK pipeline using a still already in the gallery instead of a fresh
+    /// capture. Switches to the Live tab so transcript/reply are visible.
     func askAboutMedia(_ media: CapturedMedia) async {
-        selectedTab = .assistant
+        selectedTab = .live
         guard let image = await Self.imageJPEG(from: media) else {
             phase = .error("Couldn't get an image from that item.")
             return
@@ -137,8 +186,6 @@ final class SessionCoordinator: ObservableObject {
     private func performAsk(presetImage: Data?) async {
         guard !isBusy else { return }
         isBusy = true
-        // Free the mic from the wake-word listener while we record, and hand it
-        // back when done. Covers both manual ASK and wake-triggered ASK.
         if wakeWordEnabled { wake.pause() }
         defer {
             isBusy = false
@@ -153,10 +200,7 @@ final class SessionCoordinator: ObservableObject {
             phase = .listening
             try await audio.activateForGlasses()
 
-            // Photo source: glasses when streaming, iPhone otherwise. Audio source
-            // is whatever AVAudioSession ended up with (BT route if available, else
-            // iPhone built-in mic — both produce a WAV the backend can transcribe).
-            let useGlasses = (glasses.status == .streaming)
+            let useGlasses = glasses.isStreaming
             let micLabel = useGlasses ? "glasses-mic" : "iPhone mic"
             let image: Data
             let wav: URL
@@ -175,8 +219,6 @@ final class SessionCoordinator: ObservableObject {
                 wav = recorded
             }
 
-            // Live rolling context (#1): attach recent glasses frames so Claude has
-            // temporal awareness. Only on fresh captures (not gallery hand-offs).
             let contextFrames: [Data] = (presetImage == nil && useGlasses && glasses.contextCaptureEnabled)
                 ? glasses.recentContextFrames()
                 : []
@@ -217,8 +259,6 @@ final class SessionCoordinator: ObservableObject {
 
     // MARK: – Direct camera control
 
-    /// Snap one still — from the glasses when streaming, else the iPhone camera —
-    /// and prepend it to the in-app gallery.
     func takePhotoDirect() async {
         guard !isCapturingPhoto, !isRecordingVideo else { return }
         isCapturingPhoto = true
@@ -284,7 +324,6 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
-    /// Clear the gallery and remove any backing video files from disk.
     func clearCapturedMedia() {
         for url in capturedMedia.compactMap(\.videoURL) {
             try? FileManager.default.removeItem(at: url)
@@ -292,7 +331,7 @@ final class SessionCoordinator: ObservableObject {
         capturedMedia.removeAll()
     }
 
-    // MARK: – Hands-free (#3 wake word + #6 Live Activity)
+    // MARK: – Hands-free (wake word + Live Activity)
 
     func setWakeWord(_ on: Bool) {
         wakeWordEnabled = on
@@ -327,7 +366,7 @@ final class SessionCoordinator: ObservableObject {
         liveActivity.update(status: status, detail: detail)
     }
 
-    // MARK: – Debug / diagnostics (audio + general)
+    // MARK: – Debug / diagnostics (audio + general), surfaced under More → Advanced
 
     @Published var audioRoute: String = ""
     @Published var availableInputs: String = ""
@@ -365,8 +404,6 @@ final class SessionCoordinator: ObservableObject {
         refreshAudioRoute()
     }
 
-    /// Record from the mic, then immediately play it back — end-to-end mic+speaker
-    /// test that needs no backend.
     func runMicLoopback(seconds: Double) async {
         guard !isAudioBusy, !isMonitoringMic else { return }
         isAudioBusy = true
@@ -437,7 +474,7 @@ final class SessionCoordinator: ObservableObject {
     }
 
     /// Resolve a JPEG to send to Claude: a photo's own bytes, or a mid-clip frame
-    /// extracted from a video (the backend's vision call takes a single image).
+    /// extracted from a video.
     private static func imageJPEG(from media: CapturedMedia) async -> Data? {
         switch media.kind {
         case .photo(let data):
