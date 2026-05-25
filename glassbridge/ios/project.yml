@@ -39,6 +39,8 @@ targets:
         NSBluetoothAlwaysUsageDescription: "Glassbridge connects to your Meta Ray-Ban glasses for audio and photos."
         NSBluetoothPeripheralUsageDescription: "Glassbridge connects to your Meta Ray-Ban glasses for audio and photos."
         NSLocalNetworkUsageDescription: "Glassbridge talks to the Glassbridge backend on your Mac over your local Wi-Fi network."
+        NSSpeechRecognitionUsageDescription: "Glassbridge listens on-device for your wake word so you can start a question hands-free."
+        NSSupportsLiveActivities: true
         UIBackgroundModes:
           - bluetooth-peripheral
           - external-accessory
@@ -66,8 +68,26 @@ targets:
         product: MWDATCamera
       - package: MetaWearablesDAT
         product: MWDATMockDevice
+      - target: GlassbridgeWidgetsExtension
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kish.glassbridge
         TARGETED_DEVICE_FAMILY: "1,2"
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+  GlassbridgeWidgetsExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: GlassbridgeWidgets
+      - path: Glassbridge/GlassbridgeActivityAttributes.swift
+    info:
+      path: GlassbridgeWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: Glassbridge
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kish.glassbridge.widgets
+        TARGETED_DEVICE_FAMILY: "1,2"

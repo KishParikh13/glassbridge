@@ -82,14 +82,79 @@ Force-quit + relaunch to start a fresh conversation.
 
 ```
 Glassbridge/
-├── GlassbridgeApp.swift     – @main, Wearables.configure(), URL handler
-├── ContentView.swift        – the single ASK button screen
-├── Config.swift             – backend URL + record duration + session id
-├── SessionCoordinator.swift – orchestrates the ASK flow + @Published phase
-├── GlassesController.swift  – DAT registration, DeviceSession, Stream, capturePhoto
-├── AudioController.swift    – AVAudioSession HFP wiring, record, play
-└── BackendClient.swift      – multipart POST /ask, parses response headers
+├── GlassbridgeApp.swift      – @main, Wearables.configure(), URL handler
+├── ContentView.swift         – TabView root: Assistant (ASK) + Camera tabs
+├── Config.swift              – backend URL + record duration + session id
+├── SessionCoordinator.swift  – orchestrates ASK flow + direct camera control
+├── GlassesController.swift   – DAT registration, DeviceSession, Stream, capturePhoto + video recording
+├── VideoRecorder.swift       – glasses video frames (CMSampleBuffer) → .mp4 via AVAssetWriter
+├── IPhoneVideoRecorder.swift – iPhone movie-capture fallback for the Camera tab
+├── CapturedMedia.swift       – gallery item model (photo bytes or video URL)
+├── CameraView.swift          – Camera tab: live preview, quality, rolling context, gallery
+├── DebugView.swift           – Debug tab: connection, hands-free, permissions, audio, log
+├── WakeWordListener.swift    – on-device "hey glass" wake word (Apple Speech)
+├── LiveActivityController.swift – ActivityKit wrapper (lock-screen / Dynamic Island)
+├── GlassbridgeActivityAttributes.swift – Live Activity model (shared with widget)
+├── IPhoneCapture.swift       – iPhone photo-capture fallback
+├── AudioController.swift     – AVAudioSession HFP wiring, record, play, tone + mic meter
+└── BackendClient.swift       – multipart POST /ask (+ context frames), parses headers
+
+GlassbridgeWidgets/           – Widget extension target (Live Activity UI)
+├── GlassbridgeWidgetsBundle.swift
+└── GlassbridgeLiveActivity.swift
 ```
+
+## Hands-free, live context, and tools (later additions)
+
+- **Rolling context (Camera tab toggle)** — while on, recent glasses frames are
+  kept and attached to your next ASK so Claude has temporal awareness ("what
+  changed?"). Silent; never auto-speaks. Glasses-only (needs the video stream).
+- **Wake word "hey glass" (Hands-free toggle / Debug tab)** — continuous
+  *on-device* speech recognition (Apple Speech) that fires an ASK when it hears
+  the phrase, so you can ask with the phone pocketed. Needs Speech permission.
+- **Live Activity** — while hands-free is on, assistant state (Listening /
+  Thinking / Speaking) shows on the lock screen and Dynamic Island. Requires the
+  `GlassbridgeWidgetsExtension` target (added in `project.yml`) — re-run
+  `xcodegen generate` and it appears automatically.
+- **Backend tools** — the backend gives Claude an agentic tool loop: Anthropic's
+  hosted `web_search` plus local `get_datetime` / `save_note` / `recall_notes`.
+  Toggle via `GB_WEB_SEARCH` / `GB_LOCAL_TOOLS`; needs `anthropic>=0.49`.
+
+## Debug tab (developer console)
+
+A personal tool for exercising every glasses control the DAT SDK exposes and
+seeing how well each works. All on one screen:
+
+- **Connection** — live status, device id, register / unregister.
+- **Permissions** — camera + microphone status; request either; refresh.
+- **Camera** — current quality/frame rate, *measured* FPS, last frame size, and
+  last photo-capture latency (ms). Adjust quality live from the Camera tab.
+- **Audio** — current route + available inputs, activate/deactivate the glasses
+  route, a **live mic level meter**, a **record→playback loopback** test, and a
+  **speaker test tone** — all without the backend, so you can isolate mic vs.
+  speaker vs. network.
+- **Event log** — merged DAT SDK + audio diagnostics, timestamped.
+
+The Camera tab also has a **Live preview** toggle that renders the glasses
+`videoFramePublisher` frames in real time (with an FPS readout) — the quickest
+way to confirm the stream is healthy.
+
+## Camera tab (direct glasses control)
+
+Separate from the ASK/AI flow, the **Camera** tab lets you drive the glasses
+directly:
+
+- **Photo** — snaps one still and loads it straight into the in-app gallery.
+- **Record** — toggles video recording; the finished clip lands in the gallery,
+  tappable for inline playback.
+
+Source follows the same rule as ASK: it uses the **Ray-Ban glasses** when the
+stream is live (`status: streaming`), and falls back to the **iPhone camera + mic**
+otherwise — so the tab is fully usable before glasses pairing works. Glasses
+video is built from the DAT `videoFramePublisher` frames, encoded to H.264 .mp4.
+
+> Added files (VideoRecorder, IPhoneVideoRecorder, CapturedMedia, CameraView)
+> are picked up automatically on the next `xcodegen generate`.
 
 ## Why not the simulator?
 

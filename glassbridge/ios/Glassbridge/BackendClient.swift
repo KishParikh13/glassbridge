@@ -7,6 +7,7 @@ struct BackendReply {
     let language: String?
     let sttLatency: Double?
     let llmLatency: Double?
+    let tools: String?
 }
 
 enum BackendError: LocalizedError {
@@ -42,6 +43,7 @@ final class BackendClient {
         audioURL: URL? = nil,
         audioData: Data? = nil,
         imageJPEG: Data,
+        contextFramesJPEG: [Data] = [],
         sessionId: String,
         textOverride: String? = nil
     ) async throws -> BackendReply {
@@ -79,6 +81,15 @@ final class BackendClient {
             contentType: "image/jpeg",
             data: imageJPEG
         )
+        for (i, frame) in contextFramesJPEG.enumerated() {
+            body.appendMultipartFile(
+                boundary: boundary,
+                name: "context_frames",
+                filename: "context-\(i).jpg",
+                contentType: "image/jpeg",
+                data: frame
+            )
+        }
         body.append("--\(boundary)--\r\n")
         request.httpBody = body
 
@@ -105,7 +116,8 @@ final class BackendClient {
             reply: hDecoded("X-Glassbridge-Reply"),
             language: h("X-Glassbridge-Lang"),
             sttLatency: h("X-Glassbridge-Latency-Stt").flatMap(Double.init),
-            llmLatency: h("X-Glassbridge-Latency-Llm").flatMap(Double.init)
+            llmLatency: h("X-Glassbridge-Latency-Llm").flatMap(Double.init),
+            tools: hDecoded("X-Glassbridge-Tools")
         )
     }
 }

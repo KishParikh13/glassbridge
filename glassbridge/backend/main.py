@@ -47,6 +47,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model=settings.anthropic_model,
         max_tokens=settings.anthropic_max_tokens,
         system_prompt=settings.system_prompt,
+        enable_web_search=settings.enable_web_search,
+        enable_local_tools=settings.enable_local_tools,
     )
     state.tts = ElevenLabsStreamingTTS(
         api_key=settings.elevenlabs_api_key,
@@ -73,6 +75,7 @@ async def healthz() -> dict[str, str]:
 async def ask(
     audio: UploadFile = File(...),
     image: UploadFile = File(...),
+    context_frames: list[UploadFile] = File(default=[]),
     session_id: str | None = Form(default=None),
     text_override: str | None = Form(default=None),
 ) -> StreamingResponse:
@@ -85,6 +88,13 @@ async def ask(
         raise HTTPException(400, "audio file is empty")
     if not image_bytes:
         raise HTTPException(400, "image file is empty")
+
+    # Optional rolling-context frames (oldest -> newest) for live-vision awareness.
+    context_bytes: list[bytes] = []
+    for frame in context_frames:
+        data = await frame.read()
+        if data:
+            context_bytes.append(data)
 
     if text_override and text_override.strip():
         user_text = text_override.strip()
@@ -110,14 +120,17 @@ async def ask(
             image_bytes=image_bytes,
             image_media_type=image.content_type or "image/jpeg",
             history=history,
+            context_images=context_bytes,
+            session_id=session_id,
         )
     )
     t_llm = time.perf_counter() - t0
     logger.info(
-        "LLM %.2fs in=%d out=%d reply=%r",
+        "LLM %.2fs in=%d out=%d tools=%s reply=%r",
         t_llm,
         reply.input_tokens,
         reply.output_tokens,
+        ",".join(reply.tools_used) or "-",
         reply.text[:120],
     )
 
@@ -155,6 +168,7 @@ async def ask(
         "X-Glassbridge-Lang": transcript_lang,
         "X-Glassbridge-Latency-Stt": f"{t_stt:.3f}",
         "X-Glassbridge-Latency-Llm": f"{t_llm:.3f}",
+        "X-Glassbridge-Tools": quote(",".join(reply.tools_used), safe=""),
         "Cache-Control": "no-store",
     }
     return StreamingResponse(stream_mp3(), media_type="audio/mpeg", headers=headers)

@@ -32,6 +32,7 @@ final class AudioController {
 
     private let session = AVAudioSession.sharedInstance()
     private var recorder: AVAudioRecorder?
+    private var meterRecorder: AVAudioRecorder?
     private var player: AVAudioPlayer?
     private var playbackContinuation: CheckedContinuation<Void, Never>?
     private let playbackDelegate = PlaybackDelegate()
@@ -165,6 +166,97 @@ final class AudioController {
         let i = route.inputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
         let o = route.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
         return "in=[\(i)] out=[\(o)]"
+    }
+
+    /// Newline-separated list of inputs iOS currently offers (for the Debug tab).
+    func availableInputsSummary() -> String {
+        let inputs = session.availableInputs ?? []
+        guard !inputs.isEmpty else { return "none" }
+        return inputs.map { "\($0.portType.rawValue): \($0.portName)" }.joined(separator: "\n")
+    }
+
+    /// Play any audio file (e.g. a recorded WAV) through the active route.
+    func play(fileURL url: URL) async throws {
+        let p: AVAudioPlayer
+        do { p = try AVAudioPlayer(contentsOf: url) }
+        catch { throw AudioError.playerFailed(error.localizedDescription) }
+        try await play(p)
+    }
+
+    /// Synthesize and play a sine tone — a quick "is the glasses speaker working" test.
+    func playTestTone(frequency: Double = 880, seconds: Double = 1.0) async throws {
+        let data = Self.sineWAV(frequency: frequency, seconds: seconds)
+        let p: AVAudioPlayer
+        do { p = try AVAudioPlayer(data: data, fileTypeHint: AVFileType.wav.rawValue) }
+        catch { throw AudioError.playerFailed(error.localizedDescription) }
+        try await play(p)
+    }
+
+    private func play(_ p: AVAudioPlayer) async throws {
+        p.delegate = playbackDelegate
+        guard p.prepareToPlay() else { throw AudioError.playerFailed("prepareToPlay returned false") }
+        self.player = p
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            self.playbackContinuation = cont
+            if !p.play() { self.completePlayback() }
+        }
+    }
+
+    // MARK: – Live mic level metering (Debug tab)
+
+    func startMicMonitor() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("gb-meter.wav")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsFloatKey: false,
+        ]
+        let r = try AVAudioRecorder(url: url, settings: settings)
+        r.isMeteringEnabled = true
+        guard r.prepareToRecord(), r.record() else {
+            throw AudioError.recorderFailed("mic monitor failed to start")
+        }
+        meterRecorder = r
+    }
+
+    /// Normalized 0…1 average input level. Poll while monitoring.
+    func micLevel() -> Float {
+        guard let r = meterRecorder else { return 0 }
+        r.updateMeters()
+        let db = r.averagePower(forChannel: 0)   // ~ -160 (silence) … 0 (loud)
+        let floor: Float = -50
+        let clamped = max(floor, min(0, db))
+        return (clamped - floor) / (0 - floor)
+    }
+
+    func stopMicMonitor() {
+        meterRecorder?.stop()
+        meterRecorder = nil
+    }
+
+    private static func sineWAV(frequency: Double, seconds: Double, sampleRate: Double = 16_000) -> Data {
+        let frameCount = Int(seconds * sampleRate)
+        var samples = Data(capacity: frameCount * 2)
+        let amplitude = 0.6
+        for n in 0..<frameCount {
+            let t = Double(n) / sampleRate
+            let fade = min(1.0, min(t, seconds - t) / 0.01)   // 10ms in/out fade
+            let v = sin(2 * Double.pi * frequency * t) * amplitude * max(0, fade)
+            var le = Int16(max(-1, min(1, v)) * 32_767).littleEndian
+            withUnsafeBytes(of: &le) { samples.append(contentsOf: $0) }
+        }
+        let dataBytes = UInt32(samples.count)
+        var d = Data()
+        func u32(_ v: UInt32) { var x = v.littleEndian; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } }
+        func u16(_ v: UInt16) { var x = v.littleEndian; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } }
+        d.append("RIFF".data(using: .ascii)!); u32(36 + dataBytes); d.append("WAVE".data(using: .ascii)!)
+        d.append("fmt ".data(using: .ascii)!); u32(16); u16(1); u16(1)
+        u32(UInt32(sampleRate)); u32(UInt32(sampleRate) * 2); u16(2); u16(16)
+        d.append("data".data(using: .ascii)!); u32(dataBytes); d.append(samples)
+        return d
     }
 }
 
