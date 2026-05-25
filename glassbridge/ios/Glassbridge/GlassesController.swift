@@ -266,11 +266,11 @@ final class GlassesController: ObservableObject {
             let config: StreamConfiguration
             switch quality {
             case .low:
-                config = StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: frameRate)
+                config = StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: UInt(frameRate))
             case .medium:
-                config = StreamConfiguration(videoCodec: .raw, resolution: .medium, frameRate: frameRate)
+                config = StreamConfiguration(videoCodec: .raw, resolution: .medium, frameRate: UInt(frameRate))
             case .high:
-                config = StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: frameRate)
+                config = StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: UInt(frameRate))
             }
             guard let stream = try session.addStream(config: config) else {
                 throw NSError(domain: "GlassesController", code: 10,
@@ -319,7 +319,8 @@ final class GlassesController: ObservableObject {
     }
 
     private func teardownStream() {
-        stream?.stop()
+        // Stream.stop() is async in DAT 0.7; fire-and-forget so teardown stays sync.
+        if let stream { Task { await stream.stop() } }
         stateToken = nil
         photoToken = nil
         errorToken = nil
