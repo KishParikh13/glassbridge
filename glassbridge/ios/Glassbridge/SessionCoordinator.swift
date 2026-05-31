@@ -7,6 +7,7 @@ import AVFoundation
 final class SessionCoordinator: ObservableObject {
     enum Tab: Hashable {
         case assistant
+        case code
         case camera
         case debug
     }
@@ -290,6 +291,102 @@ final class SessionCoordinator: ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
         capturedMedia.removeAll()
+    }
+
+    // MARK: – Claude Code voice control
+
+    @Published var codeSessions: [CodeSessionSummary] = []
+    @Published var activeCodeSessionId: String?
+    @Published var codeTranscript: String = ""
+    @Published var codeReply: String = ""
+    @Published var codeAction: String = ""
+    @Published var codeLatencySummary: String = ""
+    @Published var codeError: String?
+
+    var activeCodeSessionTitle: String? {
+        guard let id = activeCodeSessionId else { return nil }
+        return codeSessions.first(where: { $0.id == id })?.title
+    }
+
+    /// Pull the current list of sessions from the backend (for the picker).
+    func refreshCodeSessions() async {
+        do {
+            codeSessions = try await backend.listCodeSessions()
+            codeError = nil
+        } catch {
+            codeError = error.localizedDescription
+        }
+    }
+
+    /// Explicitly start a new session (the "+" button; voice can also do this).
+    func createCodeSession() async {
+        do {
+            let s = try await backend.createCodeSession()
+            activeCodeSessionId = s.id
+            await refreshCodeSessions()
+            codeError = nil
+        } catch {
+            codeError = error.localizedDescription
+        }
+    }
+
+    func selectCodeSession(_ id: String) {
+        activeCodeSessionId = id
+    }
+
+    /// Push-to-talk for code mode: record, send to /code/voice, speak the reply.
+    /// The backend decides whether the utterance was a command (new/list/switch)
+    /// or a message to forward to the active session.
+    func codeTalkPressed() async {
+        guard !isBusy else { return }
+        isBusy = true
+        if wakeWordEnabled { wake.pause() }
+        defer {
+            isBusy = false
+            if wakeWordEnabled { wake.resume() }
+        }
+
+        codeTranscript = ""
+        codeReply = ""
+        codeAction = ""
+        codeLatencySummary = ""
+        codeError = nil
+
+        do {
+            phase = .listening
+            try await audio.activateForGlasses()
+            let wav = try await audio.record(seconds: AppConfig.recordSeconds)
+
+            phase = .thinking
+            let result = try await backend.codeVoice(
+                audioURL: wav,
+                sessionId: activeCodeSessionId
+            )
+            codeTranscript = result.transcript ?? ""
+            codeReply = result.reply ?? ""
+            codeAction = result.action ?? ""
+            if let active = result.activeSessionId { activeCodeSessionId = active }
+            if !result.sessions.isEmpty { codeSessions = result.sessions }
+
+            var summary = ""
+            if let stt = result.sttLatency, let agent = result.agentLatency {
+                summary = String(format: "stt %.2fs · agent %.2fs", stt, agent)
+            }
+            if let tools = result.tools, !tools.isEmpty {
+                summary += summary.isEmpty ? "" : " · "
+                summary += "tools: \(tools)"
+            }
+            codeLatencySummary = summary
+
+            phase = .speaking
+            try await audio.play(mp3: result.mp3)
+            phase = .idle
+        } catch {
+            phase = .error(error.localizedDescription)
+            codeError = error.localizedDescription
+        }
+
+        audio.deactivate()
     }
 
     // MARK: – Hands-free (#3 wake word + #6 Live Activity)
