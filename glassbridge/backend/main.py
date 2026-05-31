@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -7,9 +8,10 @@ from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 import anyio
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .code_sessions import CodeSessionManager, build_manager
 from .config import Settings
 from .llm import ClaudeVision, Turn
 from .sessions import SessionStore
@@ -26,6 +28,7 @@ class AppState:
     llm: ClaudeVision
     tts: ElevenLabsStreamingTTS
     sessions: SessionStore
+    code: CodeSessionManager
 
 
 @asynccontextmanager
@@ -57,10 +60,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         output_format=settings.elevenlabs_output_format,
     )
     state.sessions = SessionStore(max_turns=settings.history_turns)
+    state.code = build_manager(settings)
+    logger.info("Code session driver: %s", state.code.driver_name)
 
     app.state.gb = state
     logger.info("Glassbridge ready on %s:%d", settings.host, settings.port)
-    yield
+    try:
+        yield
+    finally:
+        await state.code.aclose()
 
 
 app = FastAPI(title="Glassbridge", lifespan=lifespan)
@@ -169,6 +177,134 @@ async def ask(
         "X-Glassbridge-Latency-Stt": f"{t_stt:.3f}",
         "X-Glassbridge-Latency-Llm": f"{t_llm:.3f}",
         "X-Glassbridge-Tools": quote(",".join(reply.tools_used), safe=""),
+        "Cache-Control": "no-store",
+    }
+    return StreamingResponse(stream_mp3(), media_type="audio/mpeg", headers=headers)
+
+
+# MARK: – Claude Code voice control
+#
+# Talk to long-lived Claude Code sessions by voice: pick from active ones,
+# start new ones, then just speak your request. /code/voice is the one the
+# iOS app drives; /code/text and the /code/sessions JSON routes back it (and
+# double as the wire protocol the "remote" driver proxies to).
+
+
+@app.get("/code/sessions")
+async def code_list_sessions() -> dict[str, object]:
+    state: AppState = app.state.gb
+    sessions = await state.code.list_sessions()
+    return {"sessions": [s.to_dict() for s in sessions]}
+
+
+@app.post("/code/sessions")
+async def code_create_session(payload: dict | None = Body(default=None)) -> dict[str, object]:
+    state: AppState = app.state.gb
+    title = (payload or {}).get("title") if payload else None
+    info = await state.code.create_session(title)
+    return info.to_dict()
+
+
+@app.post("/code/send")
+async def code_send(
+    text: str = Form(...),
+    session_id: str = Form(...),
+) -> dict[str, object]:
+    """Forward raw text straight to a session — no intent routing.
+
+    This is the driver-level primitive the "remote" driver proxies to: the
+    routing already happened on the caller's side.
+    """
+    state: AppState = app.state.gb
+    reply = await state.code.send_to(session_id, text)
+    return {
+        "reply": reply.text,
+        "session_id": reply.session_id,
+        "tools": reply.tools_used,
+    }
+
+
+@app.post("/code/text")
+async def code_text(
+    text: str = Form(...),
+    session_id: str | None = Form(default=None),
+) -> dict[str, object]:
+    """Text-in / JSON-out twin of /code/voice. Used for testing + the remote proxy."""
+    state: AppState = app.state.gb
+    result = await state.code.handle_transcript(text, active_session_id=session_id)
+    return {
+        "action": result.action,
+        "transcript": result.transcript,
+        "reply": result.reply_full,
+        "spoken": result.spoken,
+        "session_id": result.active_session_id,
+        "tools": result.tools_used,
+        "sessions": [s.to_dict() for s in result.sessions],
+    }
+
+
+@app.post("/code/voice")
+async def code_voice(
+    audio: UploadFile = File(...),
+    session_id: str | None = Form(default=None),
+    text_override: str | None = Form(default=None),
+) -> StreamingResponse:
+    state: AppState = app.state.gb
+    t_start = time.perf_counter()
+
+    if text_override and text_override.strip():
+        transcript = text_override.strip()
+        transcript_lang = "override"
+        t_stt = 0.0
+    else:
+        audio_bytes = await audio.read()
+        if not audio_bytes:
+            raise HTTPException(400, "audio file is empty")
+        t0 = time.perf_counter()
+        stt = await anyio.to_thread.run_sync(
+            state.transcriber.transcribe, audio_bytes, audio.filename or "audio.wav"
+        )
+        t_stt = time.perf_counter() - t0
+        transcript = stt.text
+        transcript_lang = stt.language
+        logger.info("CODE STT %.2fs lang=%s: %r", t_stt, transcript_lang, transcript[:80])
+
+    t0 = time.perf_counter()
+    result = await state.code.handle_transcript(transcript, active_session_id=session_id)
+    t_agent = time.perf_counter() - t0
+    logger.info(
+        "CODE action=%s session=%s agent=%.2fs reply=%r",
+        result.action,
+        result.active_session_id,
+        t_agent,
+        result.reply_full[:120],
+    )
+
+    async def stream_mp3() -> AsyncIterator[bytes]:
+        gen = state.tts.synthesize(result.spoken)
+        try:
+            while True:
+                chunk = await anyio.to_thread.run_sync(next, gen, None)
+                if chunk is None:
+                    break
+                yield chunk
+        finally:
+            logger.info("CODE DONE total=%.2fs", time.perf_counter() - t_start)
+
+    sessions_json = json.dumps(
+        [{"id": s.id, "title": s.title} for s in result.sessions], ensure_ascii=False
+    )
+    headers = {
+        "X-Code-Action": result.action,
+        "X-Code-Transcript": quote(result.transcript, safe=""),
+        "X-Code-Reply": quote(result.reply_full, safe=""),
+        "X-Code-Spoken": quote(result.spoken, safe=""),
+        "X-Code-Active": result.active_session_id or "",
+        "X-Code-Sessions": quote(sessions_json, safe=""),
+        "X-Code-Tools": quote(",".join(result.tools_used), safe=""),
+        "X-Code-Lang": transcript_lang,
+        "X-Code-Latency-Stt": f"{t_stt:.3f}",
+        "X-Code-Latency-Agent": f"{t_agent:.3f}",
         "Cache-Control": "no-store",
     }
     return StreamingResponse(stream_mp3(), media_type="audio/mpeg", headers=headers)
