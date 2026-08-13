@@ -3,24 +3,28 @@ import UIKit
 
 // MARK: - Shared visual language
 //
-// The app's only custom palette lives on the LiveView camera stage. Settings used to be a
-// stock light Form presented as a sheet from that near-black screen, which read as leaving
-// the app and arriving in iOS Settings. These pull the same gradient and glow so it looks
-// like one product.
+// Settings used to be a stock light Form presented as a sheet from a near-black camera
+// screen, which read as leaving the app. It now sits on the same dark ground as LiveView.
+//
+// Two colours carry everything: cyan means "you can act on this", amber means "this needs
+// you". Everything else is neutral, including success. Colouring the normal state spends
+// attention on what is already fine and leaves nothing to say "look here".
 
 enum GB {
-    /// Identical to LiveView.cameraStage. If that changes, change this.
-    static let stage = LinearGradient(
-        colors: [
-            Color(red: 0.05, green: 0.07, blue: 0.08),
-            Color(red: 0.08, green: 0.13, blue: 0.14),
-            Color(red: 0.01, green: 0.02, blue: 0.025),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
+    /// Flat, not a gradient. Settings is a reading surface: a gradient behind a column of
+    /// cards fights the cards for attention and makes the same card look like two
+    /// different greys depending on how far down the screen it sits. This is the top stop
+    /// of the LiveView stage, so the two screens still share a family.
+    static let background = Color(red: 0.05, green: 0.07, blue: 0.08)
 
+    /// The only accent. It means "you can act on this" and nothing else.
     static let accent = Color.cyan
+    /// Legible text on top of `accent`, dark enough to pass contrast on cyan.
+    static let onAccent = Color(red: 0.02, green: 0.15, blue: 0.18)
+    /// The only non-neutral status colour. Reserved for something needing attention, so
+    /// that it never has to compete for meaning.
+    static let attention = Color(red: 1.0, green: 0.62, blue: 0.04)   // systemOrange
+
     static let cardFill = Color.white.opacity(0.055)
     static let cardStroke = Color.white.opacity(0.14)
     static let heroStroke = Color.white.opacity(0.26)
@@ -28,18 +32,48 @@ enum GB {
     static let label3 = Color(white: 0.92).opacity(0.30)
 }
 
-/// The dark stage behind every settings screen.
+/// Flat dark ground. Deliberately not a gradient.
 private struct StageBackground: View {
     var body: some View {
-        ZStack {
-            GB.stage
-            Circle()
-                .fill(GB.accent.opacity(0.15))
-                .frame(width: 340, height: 340)
-                .blur(radius: 72)
-                .offset(x: 130, y: -260)
+        GB.background.ignoresSafeArea()
+    }
+}
+
+/// Wraps its children onto as many lines as they need. An HStack silently overflows
+/// instead, which is how the voice chips ran off the edge on a narrow screen.
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth, x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
         }
-        .ignoresSafeArea()
+        return CGSize(width: proposal.width ?? x, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
+                       subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x + size.width > bounds.maxX, x > bounds.minX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            view.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
     }
 }
 
@@ -78,11 +112,11 @@ private struct GBCard<Content: View>: View {
         content
             .padding(13)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(attention ? Color.orange.opacity(0.055) : GB.cardFill,
+            .background(attention ? GB.attention.opacity(0.055) : GB.cardFill,
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(attention ? Color.orange.opacity(0.42) : GB.cardStroke,
+                    .strokeBorder(attention ? GB.attention.opacity(0.42) : GB.cardStroke,
                                   lineWidth: 0.7)
             )
     }
@@ -110,24 +144,45 @@ private struct GBRow: View {
     var monospaced = false
     var chevron = false
     var divider = true
+    /// Put the value on its own line under the key. For anything long enough that a
+    /// trailing layout would squeeze the key to nothing, like a route string.
+    var stacked = false
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text(key).font(.body).foregroundStyle(.white)
-                Spacer(minLength: 12)
-                Text(value)
-                    .font(monospaced ? .system(.subheadline, design: .monospaced) : .body)
-                    .foregroundStyle(valueColor)
-                    .multilineTextAlignment(.trailing)
-                if chevron {
-                    Image(systemName: "chevron.right")
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(GB.label3)
+            Group {
+                if stacked {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(key).font(.body).foregroundStyle(.white)
+                        Text(value)
+                            .font(monospaced ? .system(.caption, design: .monospaced) : .subheadline)
+                            .foregroundStyle(valueColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 11)
+                } else {
+                    HStack(spacing: 10) {
+                        Text(key).font(.body).foregroundStyle(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 12)
+                        Text(value)
+                            .font(monospaced ? .system(.subheadline, design: .monospaced) : .body)
+                            .foregroundStyle(valueColor)
+                            .multilineTextAlignment(.trailing)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if chevron {
+                            Image(systemName: "chevron.right")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(GB.label3)
+                        }
+                    }
+                    .frame(minHeight: 44)
                 }
             }
             .padding(.horizontal, 14)
-            .frame(minHeight: 44)
+
             if divider {
                 Divider().overlay(Color.white.opacity(0.10)).padding(.leading, 14)
             }
@@ -135,13 +190,23 @@ private struct GBRow: View {
     }
 }
 
+/// Status reads neutral unless something needs you. Colouring the normal state spends
+/// attention on the thing that is already fine, and leaves nothing left to say "look here".
 private struct StatusPill: View {
-    enum Tone { case ready, attention, off
+    enum Tone {
+        case ready, attention, off
+
         var color: Color {
             switch self {
-            case .ready: return Color(red: 0.19, green: 0.82, blue: 0.35)      // systemGreen
-            case .attention: return Color(red: 1.0, green: 0.62, blue: 0.04)   // systemOrange
+            case .ready: return GB.label2
+            case .attention: return GB.attention
             case .off: return GB.label3
+            }
+        }
+        var filled: Bool {
+            switch self {
+            case .ready, .attention: return true
+            case .off: return false
             }
         }
     }
@@ -150,8 +215,16 @@ private struct StatusPill: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Circle().frame(width: 7, height: 7)
+            Group {
+                if tone.filled {
+                    Circle()
+                } else {
+                    Circle().strokeBorder(lineWidth: 1)
+                }
+            }
+            .frame(width: 7, height: 7)
             Text(text).font(.subheadline.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
         }
         .foregroundStyle(tone.color)
     }
@@ -175,16 +248,25 @@ private struct StatusCardContent: View {
                             in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .strokeBorder(GB.cardStroke, lineWidth: 0.7))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.headline).foregroundStyle(.white)
-                Text(source).font(.subheadline).foregroundStyle(GB.label2).lineLimit(1)
-            }
-            Spacer(minLength: 8)
-            StatusPill(text: pill.0, tone: pill.1)
-            if pushes {
-                Image(systemName: "chevron.right")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(GB.label3)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(name).font(.headline).foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    StatusPill(text: pill.0, tone: pill.1)
+                    if pushes {
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(GB.label3)
+                    }
+                }
+                // Wraps rather than truncating. Route and state strings are long and the
+                // interesting part is usually at the end.
+                Text(source)
+                    .font(.subheadline)
+                    .foregroundStyle(GB.label2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -315,7 +397,7 @@ struct SetupView: View {
                                 }
                                 .frame(maxWidth: .infinity, minHeight: 26)
                                 .padding(.vertical, 7)
-                                .background(Color.orange, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                                .background(GB.attention, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                                 .foregroundStyle(.black)
                             }
                             .buttonStyle(.plain)
@@ -421,12 +503,12 @@ struct SetupView: View {
     @ViewBuilder
     private func outcomeText(_ turn: SessionRecorder.Recording) -> some View {
         if let outcome = turn.outcome, outcome.hasPrefix("error") {
-            Text("failed").foregroundStyle(Color(red: 1.0, green: 0.27, blue: 0.23))
+            Text("failed").foregroundStyle(GB.attention)
         } else if turn.outcome == "cancelled" {
             Text("cancelled")
         } else if let stt = turn.sttLatency, let llm = turn.llmLatency {
             Text(String(format: "%.1fs", stt + llm))
-                .foregroundStyle(Color(red: 0.19, green: 0.82, blue: 0.35))
+                .foregroundStyle(GB.label2)
         } else {
             Text("done")
         }
@@ -441,7 +523,7 @@ struct SetupView: View {
             } label: {
                 Text("Run a test ask")
                     .font(.headline)
-                    .foregroundStyle(Color(red: 0.02, green: 0.15, blue: 0.18))
+                    .foregroundStyle(GB.onAccent)
                     .frame(maxWidth: .infinity, minHeight: 30)
                     .padding(.vertical, 12)
                     .background(GB.accent, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -471,7 +553,7 @@ private struct FlowChips: View {
     let items: [(String, String)]
 
     var body: some View {
-        HStack(spacing: 6) {
+        FlowLayout(spacing: 6) {
             ForEach(items, id: \.0) { item in
                 HStack(spacing: 4) {
                     Text("\u{201C}\(item.0)\u{201D}").foregroundStyle(.white).fontWeight(.semibold)
@@ -485,7 +567,6 @@ private struct FlowChips: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -521,7 +602,7 @@ private struct GlassesDetailView: View {
                             actions
                             if let err = glasses.lastError, !err.isEmpty {
                                 Text(err).font(.footnote)
-                                    .foregroundStyle(Color(red: 1.0, green: 0.27, blue: 0.23))
+                                    .foregroundStyle(GB.attention)
                                     .padding(.horizontal, 4)
                             }
                             Text("Enable Developer Mode in the Meta AI app (Settings → your glasses), and wear them so they stay connected.")
@@ -595,15 +676,15 @@ private struct GlassesDetailView: View {
             }
             .frame(maxWidth: .infinity)
         case .needsDeviceUpdate:
-            wideButton("Open update in Meta AI", tint: .orange) { glasses.openFirmwareUpdate() }
+            wideButton("Open update in Meta AI", tint: GB.attention) { glasses.openFirmwareUpdate() }
         case .needsCameraPermission:
             wideButton("Allow camera & test") { Task { await glasses.testCameraOnce() } }
         case .connected:
             wideButton("Test camera") { Task { await glasses.testCameraOnce() } }
         case .streaming:
-            wideButton("Disconnect glasses", tint: Color(red: 1.0, green: 0.27, blue: 0.23)) {
-                glasses.unregister()
-            }
+            // Not amber. Amber means "this needs you", and disconnecting is a thing you
+            // chose, not a problem. A quiet outline is enough.
+            quietButton("Disconnect glasses") { glasses.unregister() }
         }
     }
 
@@ -612,10 +693,24 @@ private struct GlassesDetailView: View {
         Button(action: action) {
             Text(title)
                 .font(.headline)
-                .foregroundStyle(Color(red: 0.02, green: 0.15, blue: 0.18))
+                .foregroundStyle(GB.onAccent)
                 .frame(maxWidth: .infinity, minHeight: 26)
                 .padding(.vertical, 11)
                 .background(tint, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func quietButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.headline)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, minHeight: 26)
+                .padding(.vertical, 11)
+                .background(GB.cardFill, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(GB.cardStroke, lineWidth: 0.7))
         }
         .buttonStyle(.plain)
     }
@@ -671,8 +766,8 @@ private struct AgentDetailView: View {
                             GBRow(key: "Status",
                                   value: coordinator.backendHealth?.detail ?? "Not checked",
                                   valueColor: (coordinator.backendHealth?.reachable ?? false)
-                                      ? Color(red: 0.19, green: 0.82, blue: 0.35)
-                                      : Color(red: 1.0, green: 0.62, blue: 0.04),
+                                      ? GB.label2
+                                      : GB.attention,
                                   divider: false)
                         }
                     }
@@ -767,7 +862,7 @@ private struct PhoneDetailView: View {
                             .fontWeight(.semibold)
                             .frame(maxWidth: .infinity, minHeight: 26)
                             .padding(.vertical, 7)
-                            .background(Color.orange, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .background(GB.attention, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                             .foregroundStyle(.black)
                     }
                     .buttonStyle(.plain)
@@ -797,7 +892,7 @@ private struct AdvancedView: View {
                             GBRow(key: "State", value: wake.state.rawValue, monospaced: true)
                             GBRow(key: "Last heard",
                                   value: wake.lastHeard.isEmpty ? "—" : wake.lastHeard,
-                                  monospaced: true, divider: false)
+                                  monospaced: true, divider: false, stacked: true)
                         }
                     }
 
@@ -819,12 +914,14 @@ private struct AdvancedView: View {
                     GBGroup(title: "Audio route") {
                         VStack(alignment: .leading, spacing: 9) {
                             GBList {
+                                // Stacked: these run to 80+ characters and a trailing
+                                // layout crushes the key to a single letter.
                                 GBRow(key: "Route",
                                       value: coordinator.audioRoute.isEmpty ? "—" : coordinator.audioRoute,
-                                      monospaced: true)
+                                      monospaced: true, stacked: true)
                                 GBRow(key: "Inputs",
                                       value: coordinator.availableInputs.isEmpty ? "—" : coordinator.availableInputs,
-                                      monospaced: true, divider: false)
+                                      monospaced: true, divider: false, stacked: true)
                             }
                             HStack(spacing: 8) {
                                 smallButton("Refresh") { coordinator.refreshAudioRoute() }
@@ -838,8 +935,8 @@ private struct AdvancedView: View {
                         VStack(alignment: .leading, spacing: 9) {
                             ProgressView(value: Double(coordinator.micLevel))
                                 .tint(coordinator.micLevel > 0.8
-                                      ? Color(red: 1.0, green: 0.27, blue: 0.23)
-                                      : Color(red: 0.19, green: 0.82, blue: 0.35))
+                                      ? GB.attention
+                                      : GB.label2)
                             smallButton(coordinator.isMonitoringMic ? "Stop mic meter" : "Start mic meter") {
                                 Task { await coordinator.toggleMicMeter() }
                             }
