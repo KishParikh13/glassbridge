@@ -64,6 +64,12 @@ targets:
           Analytics:
             OptOut: true
         NSAppTransportSecurity:
+          # NSAllowsLocalNetworking only exempts RFC1918 (192.168/16, 10/8, 172.16/12),
+          # .local, and link-local. Tailscale addresses are CGNAT (100.64.0.0/10), which
+          # iOS does not count as local networking, so the backend over Tailscale was
+          # blocked outright with "requires the use of a secure connection".
+          # The backend is plain HTTP on a private tailnet, so allow cleartext.
+          NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
     dependencies:
       - package: MetaWearablesDAT
