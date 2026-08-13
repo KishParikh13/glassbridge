@@ -45,7 +45,8 @@ final class BackendClient {
         imageJPEG: Data,
         contextFramesJPEG: [Data] = [],
         sessionId: String,
-        textOverride: String? = nil
+        textOverride: String? = nil,
+        model: String? = nil
     ) async throws -> BackendReply {
         let askURL = endpoint.appendingPathComponent("ask")
         let boundary = "----glassbridge-\(UUID().uuidString)"
@@ -66,6 +67,9 @@ final class BackendClient {
         body.appendMultipart(boundary: boundary, name: "session_id", value: sessionId)
         if let textOverride {
             body.appendMultipart(boundary: boundary, name: "text_override", value: textOverride)
+        }
+        if let model, !model.isEmpty {
+            body.appendMultipart(boundary: boundary, name: "model", value: model)
         }
         body.appendMultipartFile(
             boundary: boundary,

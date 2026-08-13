@@ -126,9 +126,11 @@ class ClaudeVision:
         history: list[Turn] | None = None,
         context_images: list[bytes] | None = None,
         session_id: str | None = None,
+        model: str | None = None,
     ) -> ClaudeReply:
         history = history or []
         context_images = context_images or []
+        selected_model = (model or "").strip() or self._model
 
         messages: list[dict[str, Any]] = []
         for turn in history:
@@ -152,7 +154,7 @@ class ClaudeVision:
 
         logger.info(
             "Claude call: model=%s history=%d context_frames=%d tools=%d user_text=%r",
-            self._model,
+            selected_model,
             len(history),
             len(context_images),
             len(tools),
@@ -163,7 +165,7 @@ class ClaudeVision:
         # (web_search is a server tool the API resolves itself, so it won't pause here.)
         for _ in range(6):
             kwargs: dict[str, Any] = {
-                "model": self._model,
+                "model": selected_model,
                 "max_tokens": self._max_tokens,
                 "system": self._system_prompt,
                 "messages": messages,
