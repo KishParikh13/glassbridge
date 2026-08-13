@@ -91,7 +91,18 @@ final class SessionCoordinator: ObservableObject {
 
     /// Which assistant the current turn is for, decided by the wake phrase that started
     /// it. Nil means the backend's default.
-    private var currentAgentId: String?
+    @Published private(set) var currentAgentId: String?
+
+    /// The photo attached to this turn, kept so the chat can show what was actually sent.
+    /// Seeing the frame is the only way to tell "it misread the label" from "it photographed
+    /// the ceiling".
+    @Published private(set) var askImage: Data?
+
+    /// Display name of whoever is answering.
+    var currentAgentLabel: String {
+        let id = currentAgentId ?? agentDirectory.defaultAgentId
+        return agentDirectory.agent(id: id)?.label ?? "Claude"
+    }
 
     /// The turn in flight, held so a spoken "never mind" can cancel it.
     private var turnTask: Task<Void, Never>?
@@ -361,6 +372,7 @@ final class SessionCoordinator: ObservableObject {
         photoTask = nil
 
         currentAgentId = agentId
+        askImage = nil
         turnGeneration += 1
         let myGeneration = turnGeneration
         let task = Task { await performAsk(presetImage: presetImage, textOverride: textOverride) }
@@ -515,6 +527,7 @@ final class SessionCoordinator: ObservableObject {
                 // of attaching whatever the camera sees.
                 captureSource = useGlasses ? "glasses + typed" : "iPhone camera + typed"
                 image = try await (useGlasses ? glasses.capturePhoto() : iPhoneCapture.capturePhoto())
+                askImage = image
                 cue(.captured)
                 transcript = textOverride
                 wav = nil
@@ -539,6 +552,7 @@ final class SessionCoordinator: ObservableObject {
                     do {
                         let captured = try await photoTask.value
                         image = captured
+                        askImage = captured
                         cue(.captured)
                         recorder.log(.capture, "photo",
                                      detail: "\(captured.count) bytes · \(captureSource)")

@@ -44,9 +44,9 @@ sensitivity follows the environment instead of a number I guessed wrong twice.
     open docs/earcons/index.html
 
 Three complete sets, "Play a whole turn" on each. Listen on the glasses if you can.
-  a-glass    pure sines, what ships today. neutral, iOS-ish.
+  a-glass    pure sines. neutral, iOS-ish.
   b-warm     same intervals, softer timbre. a chime not a beep.
-  c-tactile  struck bells + pitch glides. most physical, least like a computer.
+  c-tactile  struck bells + pitch glides. SHIPPING — chosen.
 
 Tell me a set, or mix cues across sets, and I will wire it.
 

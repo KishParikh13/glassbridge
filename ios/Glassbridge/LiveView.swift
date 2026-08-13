@@ -69,6 +69,10 @@ struct LiveView: View {
             }
             .onChange(of: coordinator.phase) { _, phase in
                 if case .error = phase { showResponseSheet = true }
+                // Open as soon as a turn begins, not when the answer lands. Waiting for the
+                // reply meant the live transcript and the working state had nowhere to
+                // appear, and the whole point is watching the question arrive.
+                if phase == .listening { showResponseSheet = true }
             }
             .onChange(of: coordinator.capturedMedia.first?.id) { _, _ in
                 stagedMedia = coordinator.capturedMedia.first
@@ -673,18 +677,41 @@ private struct ChatResponseSheet: View {
     let onSend: () -> Void
     @Environment(\.dismiss) private var dismiss
     @FocusState private var focused: Bool
+    @State private var animateDots = false
+    @State private var dotPhase: Double = 0
+
+    /// Drives the working dots. A repeatForever animation cannot express a travelling
+    /// phase offset across three views, so the phase is stepped instead.
+    private let dotTimer = Timer.publish(every: 0.09, on: .main, in: .common).autoconnect()
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        if !coordinator.transcript.isEmpty {
+                        // What was actually sent. Seeing the frame is the only way to tell
+                        // "it misread the label" from "it photographed the ceiling".
+                        if let data = coordinator.askImage, let image = UIImage(data: data) {
+                            attachedImage(image)
+                        }
+
+                        // Live words while you are still speaking. The on-device recogniser
+                        // is already running for the wake phrase, so this is free, and it
+                        // turns the listening phase from a blank screen into something you
+                        // can watch land.
+                        if isListening, !liveWords.isEmpty {
+                            bubble(label: "YOU", text: liveWords, accent: .blue, live: true)
+                        } else if !coordinator.transcript.isEmpty {
                             bubble(label: "YOU", text: coordinator.transcript, accent: .blue)
                         }
+
                         if !coordinator.reply.isEmpty {
-                            bubble(label: "CLAUDE", text: coordinator.reply, accent: .green, markdown: true)
+                            bubble(label: coordinator.currentAgentLabel.uppercased(),
+                                   text: coordinator.reply, accent: .green, markdown: true)
+                        } else if isWorking {
+                            workingIndicator
                         }
+
                         if case .error(let message) = coordinator.phase {
                             bubble(label: "ERROR", text: message, accent: .red)
                         }
@@ -696,6 +723,7 @@ private struct ChatResponseSheet: View {
                     }
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .animation(.easeInOut(duration: 0.2), value: coordinator.phase)
                 }
 
                 HStack(spacing: 10) {
@@ -715,9 +743,26 @@ private struct ChatResponseSheet: View {
                 .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 20))
                 .padding([.horizontal, .bottom], 16)
             }
-            .navigationTitle("Claude")
+            .onReceive(dotTimer) { _ in
+                guard isWorking else { return }
+                dotPhase = (dotPhase + 0.045).truncatingRemainder(dividingBy: 1)
+            }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                // Who is answering, not just "Claude". With more than one agent armed the
+                // wake phrase decides this, and getting the wrong one is otherwise only
+                // detectable from the answer.
+                ToolbarItem(placement: .principal) {
+                    VStack(spacing: 1) {
+                        Text(coordinator.currentAgentLabel)
+                            .font(.headline)
+                        if !statusLine.isEmpty {
+                            Text(statusLine)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Close") { dismiss() }
                 }
@@ -725,11 +770,101 @@ private struct ChatResponseSheet: View {
         }
     }
 
-    private func bubble(label: String, text: String, accent: Color, markdown: Bool = false) -> some View {
+    // MARK: - State
+
+    private var isListening: Bool { coordinator.phase == .listening }
+    private var isWorking: Bool {
+        coordinator.phase == .listening || coordinator.phase == .thinking
+    }
+
+    /// The recogniser's running transcript, minus the wake phrase that started the turn.
+    private var liveWords: String {
+        var text = coordinator.wake.liveTranscript
+        for phrase in coordinator.wake.allTriggerPhrases {
+            if let range = text.lowercased().range(of: phrase) {
+                text = String(text[range.upperBound...])
+                break
+            }
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var statusLine: String {
+        switch coordinator.phase {
+        case .listening: return "Listening"
+        case .thinking:  return "Working"
+        case .speaking:  return "Speaking"
+        default:         return coordinator.conversationOpen ? "Still listening" : ""
+        }
+    }
+
+    // MARK: - Pieces
+
+    private func attachedImage(_ image: UIImage) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
+            Text("LOOKED AT")
                 .font(.system(.caption2, design: .monospaced).weight(.semibold))
-                .foregroundStyle(accent)
+                .foregroundStyle(.secondary)
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(maxWidth: .infinity)
+                .frame(height: 190)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5))
+        }
+    }
+
+    /// Three dots that actually move, rather than a spinner that says nothing about which
+    /// half of the wait you are in.
+    private var workingIndicator: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(coordinator.currentAgentLabel.uppercased())
+                .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                .foregroundStyle(.green)
+            HStack(spacing: 5) {
+                ForEach(0..<3, id: \.self) { index in
+                    Circle()
+                        .frame(width: 7, height: 7)
+                        .foregroundStyle(.secondary)
+                        .opacity(dotOpacity(index))
+                }
+                Text(coordinator.phase == .listening ? "listening" : "thinking")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 4)
+            }
+            .padding(.vertical, 4)
+        }
+        .onAppear { animateDots = true }
+        .onDisappear { animateDots = false }
+    }
+
+    private func dotOpacity(_ index: Int) -> Double {
+        guard animateDots else { return 0.3 }
+        let phase = (dotPhase + Double(index) * 0.33).truncatingRemainder(dividingBy: 1)
+        return 0.25 + 0.75 * (0.5 - 0.5 * cos(2 * .pi * phase))
+    }
+
+    private func bubble(label: String, text: String, accent: Color,
+                        markdown: Bool = false, live: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(label)
+                    .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                    .foregroundStyle(accent)
+                if live {
+                    // A pulsing dot, so partial text reads as "still arriving" rather than
+                    // as a finished sentence the recogniser got wrong.
+                    Circle()
+                        .fill(accent)
+                        .frame(width: 5, height: 5)
+                        .opacity(animateDots ? 1 : 0.25)
+                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true),
+                                   value: animateDots)
+                }
+            }
             Group {
                 if markdown,
                    let attributed = try? AttributedString(
@@ -741,9 +876,11 @@ private struct ChatResponseSheet: View {
                 }
             }
             .font(.body)
+            .foregroundStyle(live ? .secondary : .primary)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onAppear { if live { animateDots = true } }
     }
 }

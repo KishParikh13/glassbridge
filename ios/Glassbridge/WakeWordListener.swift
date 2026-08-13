@@ -134,6 +134,12 @@ final class WakeWordListener: ObservableObject {
 
     @Published private(set) var state: State = .off
     @Published private(set) var lastHeard: String = ""
+    /// What the recogniser is hearing right now, in its original casing.
+    ///
+    /// The recogniser already runs continuously, so the words are transcribed on device
+    /// before the recording is ever uploaded. Showing them costs nothing and turns the
+    /// listening phase from a blank screen into something you can watch.
+    @Published private(set) var liveTranscript: String = ""
 
     var onCommand: ((Command) -> Void)?
     var onObservation: ((Observation) -> Void)?
@@ -299,6 +305,7 @@ final class WakeWordListener: ObservableObject {
             let myGeneration = generation
             consumed = false
             reported.removeAll()
+            liveTranscript = ""
 
             // Capture the request rather than self, so the audio thread never touches an
             // actor-isolated object.
@@ -333,6 +340,7 @@ final class WakeWordListener: ObservableObject {
     private func handle(transcript: String) {
         guard !consumed else { return }
         lastHeard = transcript.lowercased()
+        liveTranscript = transcript
 
         let heard = Self.words(in: transcript)
         for wake in wakePhrases where Self.contains(wake.words, in: heard) {

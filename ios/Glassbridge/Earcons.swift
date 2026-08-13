@@ -4,10 +4,25 @@ import Foundation
 /// Synthesizes short WAV tones. Kept separate from playback so both the earcons and the
 /// speaker diagnostic build sound the same way.
 enum ToneSynth {
+    /// Timbre of a single segment.
+    enum Shape {
+        /// Plain tone.
+        case sine
+        /// Struck metal: an inharmonic partial plus a fast decay. Reads as a physical
+        /// object being hit rather than as a beep.
+        case bell
+        /// Pitch rises across the segment, like the end of a question.
+        case glideUp
+        /// Pitch falls, like a shrug.
+        case glideDown
+    }
+
     struct Segment {
         var frequency: Double
         var duration: TimeInterval
         var amplitude: Double = 0.5
+        var shape: Shape = .sine
+        var fade: TimeInterval = 0.008
 
         /// A rest. Frequency is ignored.
         static func silence(_ duration: TimeInterval) -> Segment {
@@ -155,11 +170,30 @@ enum ToneSynth {
             guard frameCount > 0 else { continue }
             for n in 0..<frameCount {
                 let t = Double(n) / sampleRate
-                // 8ms in and out so the tone does not click at the boundaries.
-                let fade = min(1.0, min(t, segment.duration - t) / 0.008)
-                let value = segment.frequency > 0
-                    ? sin(2 * Double.pi * segment.frequency * t) * segment.amplitude * max(0, fade)
-                    : 0
+                // Fade in and out so the tone does not click at the boundaries.
+                var envelope = min(1.0, min(t, segment.duration - t) / segment.fade)
+                envelope = max(0, envelope)
+
+                var wave = 0.0
+                if segment.frequency > 0 {
+                    switch segment.shape {
+                    case .sine:
+                        wave = sin(2 * Double.pi * segment.frequency * t)
+                    case .bell:
+                        // 2.76x is inharmonic on purpose: a whole-number ratio sounds like
+                        // a chord, this sounds like something struck.
+                        wave = 0.7 * sin(2 * Double.pi * segment.frequency * t)
+                             + 0.3 * sin(2 * Double.pi * segment.frequency * 2.76 * t)
+                        envelope *= exp(-3.5 * t / segment.duration)
+                    case .glideUp:
+                        let f = segment.frequency * (1 + 0.32 * (t / segment.duration))
+                        wave = sin(2 * Double.pi * f * t)
+                    case .glideDown:
+                        let f = segment.frequency * (1 - 0.24 * (t / segment.duration))
+                        wave = sin(2 * Double.pi * f * t)
+                    }
+                }
+                let value = wave * segment.amplitude * envelope
                 var little = Int16(max(-1, min(1, value)) * 32_767).littleEndian
                 withUnsafeBytes(of: &little) { samples.append(contentsOf: $0) }
             }
@@ -206,30 +240,37 @@ final class Earcons {
         /// Wake word back on.
         case awake
 
+        /// The "tactile" set: struck bells and pitch glides rather than pure intervals.
+        /// Acknowledgement rises like a question, cancel falls like a shrug, so the two
+        /// that must never be confused differ in contour and not just in pitch.
         var segments: [ToneSynth.Segment] {
             switch self {
             case .listening:
-                return [.init(frequency: 587.33, duration: 0.07),
-                        .init(frequency: 880.00, duration: 0.09)]
+                return [.init(frequency: 560, duration: 0.13, amplitude: 0.46,
+                              shape: .glideUp, fade: 0.010)]
             case .captured:
-                return [.init(frequency: 1174.66, duration: 0.05, amplitude: 0.4)]
+                return [.init(frequency: 1400, duration: 0.035, amplitude: 0.36,
+                              shape: .bell, fade: 0.004)]
             case .thinking:
-                return [.init(frequency: 440.00, duration: 0.04, amplitude: 0.18)]
+                // Only used if the continuous bed is ever disabled; the wait is normally
+                // covered by Bed instead.
+                return [.init(frequency: 500, duration: 0.05, amplitude: 0.12,
+                              shape: .bell, fade: 0.006)]
             case .cancelled:
-                return [.init(frequency: 880.00, duration: 0.07),
-                        .init(frequency: 587.33, duration: 0.09)]
+                return [.init(frequency: 700, duration: 0.14, amplitude: 0.44,
+                              shape: .glideDown, fade: 0.010)]
             case .error:
-                return [.init(frequency: 311.13, duration: 0.09),
-                        .silence(0.05),
-                        .init(frequency: 311.13, duration: 0.09)]
+                return [.init(frequency: 220, duration: 0.13, amplitude: 0.44,
+                              shape: .bell, fade: 0.008),
+                        .silence(0.03),
+                        .init(frequency: 220, duration: 0.13, amplitude: 0.44,
+                              shape: .bell, fade: 0.008)]
             case .asleep:
-                return [.init(frequency: 587.33, duration: 0.09),
-                        .init(frequency: 440.00, duration: 0.09),
-                        .init(frequency: 329.63, duration: 0.16)]
+                return [.init(frequency: 660, duration: 0.24, amplitude: 0.42,
+                              shape: .glideDown, fade: 0.015)]
             case .awake:
-                return [.init(frequency: 329.63, duration: 0.09),
-                        .init(frequency: 440.00, duration: 0.09),
-                        .init(frequency: 587.33, duration: 0.12)]
+                return [.init(frequency: 440, duration: 0.22, amplitude: 0.42,
+                              shape: .glideUp, fade: 0.015)]
             }
         }
     }
@@ -339,8 +380,8 @@ final class Earcons {
         }
     }
 
-    /// Which bed to play. One line to change once a favourite is picked.
-    var bed: Bed = .pad
+    /// Which bed to play. One line to change if the choice changes.
+    var bed: Bed = .move
 
     private var thinkingPlayer: AVAudioPlayer?
     private var thinkingStarter: Task<Void, Never>?
