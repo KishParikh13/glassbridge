@@ -8,11 +8,37 @@ Run against real Ray-Ban Meta glasses with the backend on the Mac mini over Tail
 |---|---|
 | 0 · glasses route | **Pass.** `in=[BluetoothHFP:RB Meta 003K] out=[BluetoothHFP:RB Meta 003K]`. Mic *and* speaker both carry. The A2DP reading at launch is pre-activation and misleading. |
 | 1 · wake word through glasses mic | **Pass**, once the listener stopped dying on a transient route (see below). |
-| 2 · echo cancellation / barge-in | **Not proven.** No spurious command ever fired during playback, which is a good sign, but voice-activity peaks during replies (0.029–0.056) sit close enough to the 0.030 trigger that it is not yet a clean result. |
+| 2 · echo cancellation / barge-in | **Pass**, measured 2026-08-13. See below. |
 | 3 · silence endpointing | **Pass.** Typical takes endpoint at 2.8–4.4s. One question ran to the 15s ceiling. `silenceThreshold: 0.015` looks about right for HFP. |
 | 4 · earcons | Not run formally. Wake, capture, and error cues are all audible through the glasses in normal use. |
 | 5 · voice commands | `look` **pass** — fires reliably mid-sentence and the photo reaches the model. `never mind` / `stop` / `go to sleep` not formally exercised. |
 | 6 · latency | **Pass.** 5.2–5.5s end to end: stt ~1.6, llm ~2.5–3.1, tts + transport ~0.8. |
+
+### Test 2 in full: echo cancellation
+
+The open question for the whole project was whether `.voiceChat` cancellation could keep
+the reply out of a microphone sitting inches from the speaker playing it. If not, barge-in
+was impossible and no energy threshold could have separated the two.
+
+Every follow-up window logs the loudest level seen *while audio was actually playing*. The
+valid rows are the ones where the user stayed silent (`window elapsed`):
+
+```
+peak 0.0013  echo 0.0002
+peak 0.0000  echo 0.0000
+peak 0.0191  echo 0.0002
+```
+
+**Essentially zero leakage.** Cancellation works, and barge-in can be as sensitive as the
+room allows.
+
+Barge-in itself fired five times in the same session (`closed: user spoke`), so it is
+working in practice and not merely unblocked.
+
+**Caveat on the measurement.** In rows that closed with `user spoke`, `echo` reads high
+(0.0293, 0.0558) because it captures *any* audio during playback, including the user's own
+interrupting voice. It conflates echo with barge-in. Only the silent rows measure echo.
+Worth separating properly if this is ever re-measured.
 
 ### Things that only showed up on hardware
 
