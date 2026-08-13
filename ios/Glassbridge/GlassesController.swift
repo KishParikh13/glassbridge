@@ -88,6 +88,8 @@ final class GlassesController: ObservableObject {
     private var compatibilityTokens: [DeviceIdentifier: any AnyListenerToken] = [:]
 
     private var photoContinuation: CheckedContinuation<Data, Error>?
+    /// Cancelled as soon as a photo lands, so it cannot outlive its own capture.
+    private var photoTimeoutTask: Task<Void, Never>?
     private let photoLock = NSLock()
 
     private func log(_ s: String) {
@@ -505,7 +507,15 @@ final class GlassesController: ObservableObject {
     // MARK: - Capture
 
     /// Capture one JPEG from the glasses, starting and stopping the stream on demand.
-    func capturePhoto(timeout: TimeInterval = 6.0) async throws -> Data {
+    ///
+    /// The timeout used to be 6s, and the camera routinely takes 5 to 8 to deliver: the
+    /// one measured success came back at 5.5s, half a second inside the limit. So captures
+    /// were being abandoned that would have arrived. The glasses really were taking the
+    /// picture; we stopped listening for it.
+    ///
+    /// The wait only costs anything when the photo genuinely never comes, and it is only
+    /// ever entered because the user said "look", which is a request to be looked at.
+    func capturePhoto(timeout: TimeInterval = 14.0) async throws -> Data {
         let startedForPhoto = streamState != .streaming
         if startedForPhoto { await startStreaming() }
         defer {
@@ -531,8 +541,13 @@ final class GlassesController: ObservableObject {
                     userInfo: [NSLocalizedDescriptionKey: "capturePhoto refused (stream not ready)."])))
                 return
             }
-            Task { [weak self] in
+            // Held so delivery can cancel it. Left running, a timeout from one capture
+            // fires long after that photo arrived and resolves the *next* capture's
+            // continuation with a spurious timeout.
+            photoTimeoutTask?.cancel()
+            photoTimeoutTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard !Task.isCancelled else { return }
                 self?.deliverPhoto(.failure(NSError(
                     domain: "GlassesController", code: 3,
                     userInfo: [NSLocalizedDescriptionKey: "Photo capture timed out."])))
@@ -586,6 +601,8 @@ final class GlassesController: ObservableObject {
     }
 
     private func deliverPhoto(_ result: Result<Data, Error>) {
+        photoTimeoutTask?.cancel()
+        photoTimeoutTask = nil
         photoLock.lock()
         let cont = self.photoContinuation
         self.photoContinuation = nil

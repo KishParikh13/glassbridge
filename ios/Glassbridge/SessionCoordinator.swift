@@ -798,11 +798,18 @@ final class SessionCoordinator: ObservableObject {
     /// costs nothing: by the time you stop talking the frame is usually already there.
     private func requestLook() {
         guard photoTask == nil else { return }   // one photo per turn
-        let useGlasses = glasses.canCaptureFromGlasses
-        captureSource = useGlasses ? "glasses camera (asked)" : "iPhone camera (asked)"
-        recorder.log(.capture, "look requested", detail: useGlasses ? "glasses" : "iPhone")
-        photoTask = Task {
-            try await useGlasses ? glasses.capturePhoto() : iPhoneCapture.capturePhoto()
+        let tryGlasses = glasses.canCaptureFromGlasses
+        captureSource = tryGlasses ? "glasses camera (asked)" : "iPhone camera (asked)"
+        recorder.log(.capture, "look requested",
+                     detail: tryGlasses
+                        ? "glasses · camera permission \(glasses.cameraPermission)"
+                        : "iPhone")
+
+        photoTask = Task { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await tryGlasses
+                ? self.glasses.capturePhoto()
+                : self.iPhoneCapture.capturePhoto()
         }
     }
 
