@@ -1,5 +1,27 @@
 # Hardware validation pass
 
+## Results — first session, 2026-08-12
+
+Run against real Ray-Ban Meta glasses with the backend on the Mac mini over Tailscale.
+
+| Test | Result |
+|---|---|
+| 0 · glasses route | **Pass.** `in=[BluetoothHFP:RB Meta 003K] out=[BluetoothHFP:RB Meta 003K]`. Mic *and* speaker both carry. The A2DP reading at launch is pre-activation and misleading. |
+| 1 · wake word through glasses mic | **Pass**, once the listener stopped dying on a transient route (see below). |
+| 2 · echo cancellation / barge-in | **Not proven.** No spurious command ever fired during playback, which is a good sign, but voice-activity peaks during replies (0.029–0.056) sit close enough to the 0.030 trigger that it is not yet a clean result. |
+| 3 · silence endpointing | **Pass.** Typical takes endpoint at 2.8–4.4s. One question ran to the 15s ceiling. `silenceThreshold: 0.015` looks about right for HFP. |
+| 4 · earcons | Not run formally. Wake, capture, and error cues are all audible through the glasses in normal use. |
+| 5 · voice commands | `look` **pass** — fires reliably mid-sentence and the photo reaches the model. `never mind` / `stop` / `go to sleep` not formally exercised. |
+| 6 · latency | **Pass.** 5.2–5.5s end to end: stt ~1.6, llm ~2.5–3.1, tts + transport ~0.8. |
+
+### Things that only showed up on hardware
+
+- **A second Bluetooth device silently kills the wake word.** AirPods connecting left an A2DP output with no mic; the engine could not start a tap, and the listener marked itself unavailable *permanently*. Now retries with backoff and treats a route change as a free retry.
+- **The glasses camera takes ~6s to deliver a photo**, against a timeout that was exactly 6.0s — a coin flip landing on the wrong side almost every time. Measured: ~2s for the stream to reach `.streaming`, then ~6.0s from `capturePhoto` to `photoDataPublisher` firing. Timeout is now 14s and capture has been consistent since. Worth re-measuring the real distribution over a longer run before assuming 14s is the right ceiling.
+- **Tailscale is not "local networking" to iOS.** CGNAT (100.64.0.0/10) is outside `NSAllowsLocalNetworking`, so every request was blocked by ATS. And `NSAllowsLocalNetworking` *disables* `NSAllowsArbitraryLoads` on iOS 10+, so having both keys silently does nothing.
+
+
+
 The app has never run against the glasses. Every claim about the hands-free experience is
 currently an inference from port types and API docs, not an observation. This is the
 session that turns them into facts.
