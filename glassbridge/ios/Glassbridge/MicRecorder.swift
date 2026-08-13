@@ -37,6 +37,7 @@ final class MicRecorder: @unchecked Sendable {
         case converterUnavailable
         case fileFailed(String)
         case producedNothing
+        case cancelled
 
         var errorDescription: String? {
             switch self {
@@ -48,6 +49,8 @@ final class MicRecorder: @unchecked Sendable {
                 return "Recorder: \(message)"
             case .producedNothing:
                 return "The microphone produced no audio."
+            case .cancelled:
+                return "Recording cancelled."
             }
         }
     }
@@ -58,10 +61,16 @@ final class MicRecorder: @unchecked Sendable {
         self.hub = hub
     }
 
+    /// Cancelling the calling task aborts the take. Without this, saying "never mind"
+    /// mid-question left the continuation parked until the watchdog gave up on it.
     func record(_ options: Options = .ask) async throws -> URL {
         let take = try Take(options: options, inputFormat: hub.inputFormat)
-        return try await withCheckedThrowingContinuation { continuation in
-            take.begin(hub: hub, continuation: continuation)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                take.begin(hub: hub, continuation: continuation)
+            }
+        } onCancel: {
+            take.abort()
         }
     }
 }
@@ -145,6 +154,12 @@ private final class Take: @unchecked Sendable {
         } catch {
             finish(.failure(error))
         }
+    }
+
+    /// Drop the take. The continuation gets `.cancelled` instead of being left parked
+    /// until the watchdog notices.
+    func abort() {
+        finish(.failure(MicRecorder.RecorderError.cancelled))
     }
 
     /// Realtime audio thread.
@@ -245,15 +260,18 @@ private final class Take: @unchecked Sendable {
 
         // Let every queued write land before handing the file back, otherwise the upload
         // can read a WAV that is still missing its tail.
+        let takeURL = self.url
         writeQueue.async {
+            // Nobody is going to read a cancelled, failed, or empty take, and these land
+            // in the temp directory one file per ask.
             switch result {
-            case .success(let url):
-                if producedAudio {
-                    continuation?.resume(returning: url)
-                } else {
-                    continuation?.resume(throwing: MicRecorder.RecorderError.producedNothing)
-                }
+            case .success(let url) where producedAudio:
+                continuation?.resume(returning: url)
+            case .success:
+                try? FileManager.default.removeItem(at: takeURL)
+                continuation?.resume(throwing: MicRecorder.RecorderError.producedNothing)
             case .failure(let error):
+                try? FileManager.default.removeItem(at: takeURL)
                 continuation?.resume(throwing: error)
             }
         }

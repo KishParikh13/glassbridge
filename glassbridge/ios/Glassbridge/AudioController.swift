@@ -110,11 +110,17 @@ final class AudioController {
         }
         self.player = player
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            self.playbackContinuation = continuation
-            if !player.play() {
-                self.completePlayback()
+        // Cancelling the calling task cuts the reply off. Without this, "never mind"
+        // during playback still made you sit through the rest of the sentence.
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                self.playbackContinuation = continuation
+                if !player.play() {
+                    self.completePlayback()
+                }
             }
+        } onCancel: {
+            Task { @MainActor in self.stopPlayback() }
         }
     }
 

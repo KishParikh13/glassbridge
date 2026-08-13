@@ -53,7 +53,12 @@ final class SessionCoordinator: ObservableObject {
     }
 
     @Published var phase: Phase = .idle {
-        didSet { syncLiveActivity() }
+        didSet {
+            syncLiveActivity()
+            // What the listener is armed for follows the phase exactly: "stop" only means
+            // something while a reply is playing, the trigger phrase only while idle.
+            syncListenerScope()
+        }
     }
     @Published var transcript: String = ""
     @Published var reply: String = ""
@@ -66,7 +71,11 @@ final class SessionCoordinator: ObservableObject {
     private let iPhoneCapture = IPhoneCapture()
     private let iPhoneVideo = IPhoneVideoRecorder()
     private let liveActivity = LiveActivityController()
+    private let earcons = Earcons()
     private var isBusy = false
+
+    /// The turn in flight, held so a spoken "never mind" can cancel it.
+    private var turnTask: Task<Void, Never>?
 
     @Published var wakeWordEnabled = false
     @Published var captureSource: String = "auto"
@@ -119,6 +128,11 @@ final class SessionCoordinator: ObservableObject {
         glasses.start()
         refreshPermissionStatuses()
         if !hasCompletedOnboarding { selectedTab = .setup }
+        // "Go to sleep" is meant to stick. The listener comes back exactly as you left it
+        // rather than resetting to off, or to on, on every launch.
+        if UserDefaults.standard.bool(forKey: wakeWordKey) {
+            setWakeWord(true, announce: false)
+        }
         #if DEBUG
         maybeRunAutomatedTestAtLaunch()
         #endif
@@ -214,20 +228,20 @@ final class SessionCoordinator: ObservableObject {
     #endif
 
     func askPressed() async {
-        await performAsk(presetImage: nil)
+        await runTurn(presetImage: nil)
     }
 
     func askTypedPrompt(_ prompt: String, presetImage: Data? = nil) async {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        await performAsk(presetImage: presetImage, textOverride: trimmed)
+        await runTurn(presetImage: presetImage, textOverride: trimmed)
     }
 
     func askTypedPrompt(_ prompt: String, media: CapturedMedia?) async {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || media != nil else { return }
         let image = media == nil ? nil : await Self.imageJPEG(from: media!)
-        await performAsk(presetImage: image, textOverride: trimmed.isEmpty ? "Describe this." : trimmed)
+        await runTurn(presetImage: image, textOverride: trimmed.isEmpty ? "Describe this." : trimmed)
     }
 
     /// Run the ASK pipeline using a still already in the gallery instead of a fresh
@@ -238,18 +252,27 @@ final class SessionCoordinator: ObservableObject {
             phase = .error("Couldn't get an image from that item.")
             return
         }
-        await performAsk(presetImage: image)
+        await runTurn(presetImage: image)
+    }
+
+    /// Every entry point comes through here, so there is exactly one turn in flight and
+    /// exactly one handle on it for a spoken "never mind" to cancel.
+    private func runTurn(presetImage: Data?, textOverride: String? = nil) async {
+        guard !isBusy else { return }
+        isBusy = true
+        suppressCancelCue = false
+        let task = Task { await performAsk(presetImage: presetImage, textOverride: textOverride) }
+        turnTask = task
+        await task.value
+        turnTask = nil
+        isBusy = false
     }
 
     private func performAsk(presetImage: Data?, textOverride: String? = nil) async {
-        guard !isBusy else { return }
-        isBusy = true
         print("[ASK] start wakeWord=\(wakeWordEnabled)")
-        if wakeWordEnabled { wake.pause() }
-        defer {
-            isBusy = false
-            if wakeWordEnabled { wake.resume() }
-        }
+        // The listener deliberately keeps running for the whole turn now. Pausing it here
+        // is what used to make a reply impossible to interrupt.
+        defer { earcons.stopThinking() }
 
         transcript = ""
         reply = ""
@@ -280,6 +303,7 @@ final class SessionCoordinator: ObservableObject {
                 captureSource = useGlasses ? "glasses + \(micLabel)" : "iPhone camera + iPhone mic"
                 if let textOverride {
                     image = try await (useGlasses ? glasses.capturePhoto() : iPhoneCapture.capturePhoto())
+                    earcons.play(.captured)
                     transcript = textOverride
                     wav = nil
                     audioData = Self.silentWAV()
@@ -288,14 +312,21 @@ final class SessionCoordinator: ObservableObject {
                     async let photoData: Data = useGlasses
                         ? glasses.capturePhoto()
                         : iPhoneCapture.capturePhoto()
-                    let (img, recorded) = try await (photoData, audioURL)
-                    image = img
-                    wav = recorded
+                    // Click the moment the frame lands, not when the whole turn's IO
+                    // settles. This is the cue that tells you to stop holding the thing up
+                    // to the light, so it is worth nothing if it waits for the recording
+                    // to endpoint first.
+                    image = try await photoData
+                    earcons.play(.captured)
+                    wav = try await audioURL
                     audioData = nil
                 }
             }
 
+            try Task.checkCancellation()
+
             phase = .thinking
+            earcons.startThinking()
             let result = try await backend.ask(
                 audioURL: wav,
                 audioData: audioData,
@@ -305,6 +336,9 @@ final class SessionCoordinator: ObservableObject {
                 textOverride: textOverride,
                 model: selectedModel.rawValue.isEmpty ? nil : selectedModel.rawValue
             )
+            earcons.stopThinking()
+            try Task.checkCancellation()
+
             transcript = result.transcript ?? ""
             reply = result.reply ?? ""
             var summary = ""
@@ -319,12 +353,23 @@ final class SessionCoordinator: ObservableObject {
 
             phase = .speaking
             try await audio.play(mp3: result.mp3)
+            // Cutting playback short resumes the player normally, so the cancel only
+            // surfaces here.
+            try Task.checkCancellation()
 
             phase = .idle
         } catch {
-            print("[ASK] failed: \(error.localizedDescription)")
-            phase = .error(error.localizedDescription)
+            if Self.isCancellation(error) {
+                print("[ASK] cancelled")
+                if !suppressCancelCue { earcons.play(.cancelled) }
+                phase = .idle
+            } else {
+                print("[ASK] failed: \(error.localizedDescription)")
+                earcons.play(.error)
+                phase = .error(error.localizedDescription)
+            }
         }
+        suppressCancelCue = false
 
         // The session deliberately stays active between asks. Tearing it down here is what
         // used to cut off the wake word listener and make a follow-up impossible.
@@ -460,20 +505,81 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
-    // MARK: – Hands-free (wake word + Live Activity)
+    // MARK: – Hands-free (wake word + voice control + Live Activity)
 
-    func setWakeWord(_ on: Bool) {
+    private let wakeWordKey = "gb.wakeWordEnabled"
+
+    /// Set once when a turn is cancelled by something that has its own closing sound, so
+    /// "go to sleep" mid-reply does not stack the cancel cue on top of the sleep cue.
+    private var suppressCancelCue = false
+
+    func setWakeWord(_ on: Bool, announce: Bool = true) {
         wakeWordEnabled = on
+        UserDefaults.standard.set(on, forKey: wakeWordKey)
         if on {
-            wake.onWake = { [weak self] in
-                Task { await self?.askPressed() }
-            }
+            wake.onCommand = { [weak self] command in self?.handle(command) }
             wake.start()
+            syncListenerScope()
+            if announce { earcons.play(.awake) }
             liveActivity.start(status: "Ready", detail: "Say \u{201C}\(wake.triggerPhrase)\u{201D}")
         } else {
             wake.stop()
             liveActivity.end()
         }
+    }
+
+    /// The spoken control surface. Which of these can fire at any given moment is settled
+    /// by `syncListenerScope`, so nothing here has to second-guess the phase.
+    private func handle(_ command: WakeWordListener.Command) {
+        switch command {
+        case .wake:
+            earcons.play(.listening)
+            Task { await runTurn(presetImage: nil) }
+        case .cancel:
+            cancelTurn()
+        case .stopSpeaking:
+            // Resumes the player's continuation, so the turn finishes on its own terms
+            // rather than unwinding as a cancel. You asked it to stop talking, not to
+            // forget the question.
+            audio.stopPlayback()
+        case .sleep:
+            earcons.play(.asleep)
+            cancelTurn(silent: true)
+            setWakeWord(false)
+        }
+    }
+
+    /// Drop the turn in flight. A false trigger captures first and this is how you take it
+    /// back, which is the whole reason the capture click has to be audible.
+    func cancelTurn(silent: Bool = false) {
+        guard let turnTask else { return }
+        suppressCancelCue = silent
+        turnTask.cancel()
+    }
+
+    /// The listener is armed for exactly what makes sense right now: the trigger phrase
+    /// only while idle, so a question cannot open a second turn, and "stop" only while a
+    /// reply is playing, so asking whether you should stop taking something does not cut
+    /// itself off.
+    private func syncListenerScope() {
+        guard wakeWordEnabled else { return }
+        switch phase {
+        case .idle, .error:
+            wake.setScope(.idle)
+        case .listening, .thinking:
+            wake.setScope(.capturing)
+        case .speaking:
+            wake.setScope(.speaking)
+        }
+    }
+
+    /// A dropped turn is not a failure, and it arrives wearing a different coat depending
+    /// on which await was in flight when the cancel landed.
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let recorder = error as? MicRecorder.RecorderError, case .cancelled = recorder { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        return false
     }
 
     private func syncLiveActivity() {
