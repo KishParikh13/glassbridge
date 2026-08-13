@@ -69,8 +69,13 @@ targets:
           # iOS does not count as local networking, so the backend over Tailscale was
           # blocked outright with "requires the use of a secure connection".
           # The backend is plain HTTP on a private tailnet, so allow cleartext.
+          #
+          # NSAllowsLocalNetworking is deliberately absent. Apple's rule: for apps built
+          # against iOS 10 or later, if NSAllowsLocalNetworking (or the WebContent/Media
+          # variants) is present, NSAllowsArbitraryLoads is IGNORED. Having both meant the
+          # exception silently did nothing. ArbitraryLoads already covers LAN addresses,
+          # so nothing is lost by dropping it.
           NSAllowsArbitraryLoads: true
-          NSAllowsLocalNetworking: true
     dependencies:
       - package: MetaWearablesDAT
         product: MWDATCore

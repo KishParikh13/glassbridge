@@ -37,12 +37,16 @@ final class BackendClient {
         self.session = URLSession(configuration: cfg)
     }
 
-    /// Multipart POST: audio (wav) + image (jpeg). Returns the full MP3 + headers.
+    /// Multipart POST: audio (wav), plus an image only when there is one. Returns the
+    /// full MP3 + headers.
+    ///
+    /// The image is optional because most questions are language, not vision. A photo is
+    /// attached only when the user said "look".
     /// `textOverride` skips backend STT when non-nil — used by the simulator E2E test.
     func ask(
         audioURL: URL? = nil,
         audioData: Data? = nil,
-        imageJPEG: Data,
+        imageJPEG: Data? = nil,
         contextFramesJPEG: [Data] = [],
         sessionId: String,
         textOverride: String? = nil,
@@ -78,13 +82,15 @@ final class BackendClient {
             contentType: "audio/wav",
             data: finalAudio
         )
-        body.appendMultipartFile(
-            boundary: boundary,
-            name: "image",
-            filename: "frame.jpg",
-            contentType: "image/jpeg",
-            data: imageJPEG
-        )
+        if let imageJPEG {
+            body.appendMultipartFile(
+                boundary: boundary,
+                name: "image",
+                filename: "frame.jpg",
+                contentType: "image/jpeg",
+                data: imageJPEG
+            )
+        }
         for (i, frame) in contextFramesJPEG.enumerated() {
             body.appendMultipartFile(
                 boundary: boundary,

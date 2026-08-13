@@ -71,7 +71,9 @@ async def healthz() -> dict[str, str]:
 @app.post("/ask")
 async def ask(
     audio: UploadFile = File(...),
-    image: UploadFile = File(...),
+    # Optional: the app only captures when the user says "look". Most questions are
+    # language, not vision, and a photo nobody asked for costs latency and tokens.
+    image: UploadFile | None = File(default=None),
     context_frames: list[UploadFile] = File(default=[]),
     session_id: str | None = Form(default=None),
     text_override: str | None = Form(default=None),
@@ -81,11 +83,9 @@ async def ask(
     t_start = time.perf_counter()
 
     audio_bytes = await audio.read()
-    image_bytes = await image.read()
+    image_bytes = await image.read() if image is not None else None
     if not audio_bytes:
         raise HTTPException(400, "audio file is empty")
-    if not image_bytes:
-        raise HTTPException(400, "image file is empty")
 
     # Optional rolling-context frames (oldest -> newest) for live-vision awareness.
     context_bytes: list[bytes] = []
@@ -116,7 +116,7 @@ async def ask(
         lambda: state.llm.ask(
             user_text=user_text,
             image_bytes=image_bytes,
-            image_media_type=image.content_type or "image/jpeg",
+            image_media_type=(image.content_type if image is not None else None) or "image/jpeg",
             history=history,
             context_images=context_bytes,
             session_id=session_id,

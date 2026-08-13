@@ -91,6 +91,12 @@ final class SessionCoordinator: ObservableObject {
     /// The turn in flight, held so a spoken "never mind" can cancel it.
     private var turnTask: Task<Void, Never>?
 
+    /// A photo capture started mid-question by saying "look". Nil means this turn is
+    /// language only, which is now the default: most questions do not need eyes, and a
+    /// capture nobody asked for cost latency, tokens, and (with the glasses camera
+    /// blocked) killed the whole turn on a 7 second timeout.
+    private var photoTask: Task<Data, Error>?
+
     @Published var wakeWordEnabled = false
     @Published var captureSource: String = "auto"
     @Published var selectedTab: Tab = .live
@@ -317,10 +323,14 @@ final class SessionCoordinator: ObservableObject {
         guard !isBusy else { return }
         isBusy = true
         suppressCancelCue = false
+        // Each turn decides for itself whether it needs eyes.
+        photoTask?.cancel()
+        photoTask = nil
         let task = Task { await performAsk(presetImage: presetImage, textOverride: textOverride) }
         turnTask = task
         await task.value
         turnTask = nil
+        photoTask = nil
         isBusy = false
     }
 
@@ -352,7 +362,7 @@ final class SessionCoordinator: ObservableObject {
 
             let useGlasses = glasses.canCaptureFromGlasses
             let micLabel = useGlasses ? "glasses-mic" : "iPhone mic"
-            let image: Data
+            var image: Data?
             let wav: URL?
             let audioData: Data?
             if let presetImage {
@@ -365,30 +375,31 @@ final class SessionCoordinator: ObservableObject {
                     wav = nil
                     audioData = Self.silentWAV()
                 }
+            } else if let textOverride {
+                // Typed asks have no chance to say "look", so they keep the old behavior
+                // of attaching whatever the camera sees.
+                captureSource = useGlasses ? "glasses + typed" : "iPhone camera + typed"
+                image = try await (useGlasses ? glasses.capturePhoto() : iPhoneCapture.capturePhoto())
+                cue(.captured)
+                transcript = textOverride
+                wav = nil
+                audioData = Self.silentWAV()
             } else {
-                captureSource = useGlasses ? "glasses + \(micLabel)" : "iPhone camera + iPhone mic"
-                if let textOverride {
-                    image = try await (useGlasses ? glasses.capturePhoto() : iPhoneCapture.capturePhoto())
+                // Language only unless you ask for eyes. `requestLook()` may start a
+                // capture while this is still recording.
+                captureSource = "\(micLabel), no photo"
+                let recorded = try await audio.recordQuestion()
+                recorder.log(.recording, "endpointed", detail: Self.wavSummary(recorded))
+                wav = recorded
+                audioData = nil
+
+                if let photoTask {
+                    // Usually already finished: "look" lands mid-sentence and the capture
+                    // has been running ever since.
+                    image = try await photoTask.value
                     cue(.captured)
-                    transcript = textOverride
-                    wav = nil
-                    audioData = Self.silentWAV()
-                } else {
-                    async let audioURL: URL = audio.recordQuestion()
-                    async let photoData: Data = useGlasses
-                        ? glasses.capturePhoto()
-                        : iPhoneCapture.capturePhoto()
-                    // Click the moment the frame lands, not when the whole turn's IO
-                    // settles. This is the cue that tells you to stop holding the thing up
-                    // to the light, so it is worth nothing if it waits for the recording
-                    // to endpoint first.
-                    image = try await photoData
-                    cue(.captured)
-                    recorder.log(.capture, "photo", detail: "\(image.count) bytes · \(captureSource)")
-                    let recorded = try await audioURL
-                    recorder.log(.recording, "endpointed", detail: Self.wavSummary(recorded))
-                    wav = recorded
-                    audioData = nil
+                    recorder.log(.capture, "photo",
+                                 detail: "\(image?.count ?? 0) bytes · \(captureSource)")
                 }
             }
 
@@ -642,10 +653,26 @@ final class SessionCoordinator: ObservableObject {
             // rather than unwinding as a cancel. You asked it to stop talking, not to
             // forget the question.
             audio.stopPlayback()
+        case .look:
+            requestLook()
         case .sleep:
             cue(.asleep)
             cancelTurn(silent: true)
             setWakeWord(false)
+        }
+    }
+
+    /// Start a capture for the question being asked right now.
+    ///
+    /// Runs concurrently with the recording, so saying "look" partway through a sentence
+    /// costs nothing: by the time you stop talking the frame is usually already there.
+    private func requestLook() {
+        guard photoTask == nil else { return }   // one photo per turn
+        let useGlasses = glasses.canCaptureFromGlasses
+        captureSource = useGlasses ? "glasses camera (asked)" : "iPhone camera (asked)"
+        recorder.log(.capture, "look requested", detail: useGlasses ? "glasses" : "iPhone")
+        photoTask = Task {
+            try await useGlasses ? glasses.capturePhoto() : iPhoneCapture.capturePhoto()
         }
     }
 
@@ -681,8 +708,10 @@ final class SessionCoordinator: ObservableObject {
         switch phase {
         case .idle, .error:
             wake.setScope(.idle)
-        case .listening, .thinking:
+        case .listening:
             wake.setScope(.capturing)
+        case .thinking:
+            wake.setScope(.thinking)
         case .speaking:
             wake.setScope(.speaking)
         }

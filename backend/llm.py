@@ -121,7 +121,7 @@ class ClaudeVision:
         self,
         *,
         user_text: str,
-        image_bytes: bytes,
+        image_bytes: bytes | None = None,
         image_media_type: str = "image/jpeg",
         history: list[Turn] | None = None,
         context_images: list[bytes] | None = None,
@@ -137,14 +137,19 @@ class ClaudeVision:
             messages.append({"role": "user", "content": turn.user_text})
             messages.append({"role": "assistant", "content": turn.assistant_text})
 
+        # Most questions do not need eyes. A photo now arrives only when the user asked
+        # for one by saying "look", so text-only turns are the common case: faster, and
+        # they stop spending vision tokens on "how long do I boil an egg".
         content: list[dict[str, Any]] = []
         if context_images:
             content.append({"type": "text", "text": "Recent frames from my view (oldest to newest):"})
             for frame in context_images:
                 content.append(self._image_block(frame))
             content.append({"type": "text", "text": "Current view:"})
-        content.append(self._image_block(image_bytes, image_media_type))
-        content.append({"type": "text", "text": user_text or "What am I looking at?"})
+        if image_bytes:
+            content.append(self._image_block(image_bytes, image_media_type))
+        default_text = "What am I looking at?" if image_bytes else "Are you there?"
+        content.append({"type": "text", "text": user_text or default_text})
         messages.append({"role": "user", "content": content})
 
         tools = self._tools()

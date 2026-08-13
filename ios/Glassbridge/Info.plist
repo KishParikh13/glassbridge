@@ -55,8 +55,6 @@
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Glassbridge connects to your Meta Ray-Ban glasses for audio and photos.</string>

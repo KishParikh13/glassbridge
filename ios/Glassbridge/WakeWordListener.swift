@@ -26,6 +26,15 @@ final class WakeWordListener: ObservableObject {
         case stopSpeaking
         /// "go to sleep". Switches the listener off until you turn it back on.
         case sleep
+        /// "look". Attaches a photo to the question being asked right now.
+        ///
+        /// Deliberately not a wake variant. The listener keeps running through the whole
+        /// turn, so this can fire from anywhere in the sentence ("hey glass, look at this
+        /// label" or "hey glass, what is this, have a look") and the capture starts the
+        /// moment the word lands, concurrently with the rest of the recording. Making it
+        /// part of the wake phrase would have meant pausing after every "hey glass" to
+        /// see whether "look" followed.
+        case look
 
         var flag: Scope {
             switch self {
@@ -33,6 +42,7 @@ final class WakeWordListener: ObservableObject {
             case .cancel: return .cancel
             case .stopSpeaking: return .stopSpeaking
             case .sleep: return .sleep
+            case .look: return .look
             }
         }
     }
@@ -48,12 +58,15 @@ final class WakeWordListener: ObservableObject {
         static let cancel = Scope(rawValue: 1 << 1)
         static let stopSpeaking = Scope(rawValue: 1 << 2)
         static let sleep = Scope(rawValue: 1 << 3)
+        static let look = Scope(rawValue: 1 << 4)
 
         /// Nothing running: you can start a turn or send it to sleep.
         static let idle: Scope = [.wake, .sleep]
-        /// Recording, or waiting on the backend. "stop" is deliberately absent here: it
-        /// would fire on the question itself.
-        static let capturing: Scope = [.cancel, .sleep]
+        /// Recording the question. "stop" is deliberately absent: it would fire on the
+        /// question itself. "look" is armed because this is exactly when you say it.
+        static let capturing: Scope = [.cancel, .sleep, .look]
+        /// Waiting on the backend. Too late to ask for a photo, the audio is already sent.
+        static let thinking: Scope = [.cancel, .sleep]
         /// A reply is playing, so "stop" finally has something to mean.
         static let speaking: Scope = [.cancel, .stopSpeaking, .sleep]
 
@@ -105,6 +118,8 @@ final class WakeWordListener: ObservableObject {
         // Apple's recognizer emits this as one token about as often as two.
         (.cancel, ["nevermind"]),
         (.stopSpeaking, ["stop"]),
+        // Whole-word, so "looking" and "lookout" do not fire it.
+        (.look, ["look"]),
     ]
 
     init(phrase: String = "hey glass") {
