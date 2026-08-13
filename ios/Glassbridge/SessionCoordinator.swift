@@ -100,6 +100,18 @@ final class SessionCoordinator: ObservableObject {
     /// Bumped per turn so a turn that gets barged in on can tell it is no longer current.
     private var turnGeneration = 0
 
+    /// True while a reply is playing or during the follow-up window after it. In this
+    /// state just talking starts the next turn: no wake phrase, same conversation.
+    @Published private(set) var conversationOpen = false
+    private var followUpTimer: Task<Void, Never>?
+
+    /// How long to keep listening after a reply ends.
+    private let followUpWindow: TimeInterval = 15
+
+    private lazy var voiceActivity = VoiceActivityDetector { [weak self] in
+        self?.speechDetectedWhileOpen()
+    }
+
     @Published var wakeWordEnabled = false
     @Published var captureSource: String = "auto"
     @Published var selectedTab: Tab = .live
@@ -326,6 +338,9 @@ final class SessionCoordinator: ObservableObject {
         guard !isBusy else { return }
         isBusy = true
         suppressCancelCue = false
+        // The detector must not be listening while we record, or the question itself
+        // would look like an interruption of its own turn.
+        closeConversation(reason: "turn started")
         // Each turn decides for itself whether it needs eyes.
         photoTask?.cancel()
         photoTask = nil
@@ -342,6 +357,55 @@ final class SessionCoordinator: ObservableObject {
         turnTask = nil
         photoTask = nil
         isBusy = false
+    }
+
+    // MARK: – Open conversation
+
+    /// Start listening for the user simply talking, rather than for a phrase.
+    ///
+    /// Runs from the moment a reply starts playing until the follow-up window closes, so
+    /// you can talk over the answer or pick it up a few seconds later, either way without
+    /// saying the trigger phrase again.
+    private func openConversation() {
+        followUpTimer?.cancel()
+        conversationOpen = true
+        voiceActivity.start()
+        recorder.log(.turn, "conversation open")
+    }
+
+    /// Called when the reply finishes: hold the window open a while before going back to
+    /// needing the wake phrase.
+    private func startFollowUpCountdown() {
+        followUpTimer?.cancel()
+        followUpTimer = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(self.followUpWindow * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self.closeConversation(reason: "window elapsed")
+        }
+    }
+
+    private func closeConversation(reason: String) {
+        guard conversationOpen else { return }
+        followUpTimer?.cancel()
+        followUpTimer = nil
+        conversationOpen = false
+        let peak = voiceActivity.observedPeak
+        voiceActivity.stop()
+        // The peak is how close the room (and any echo of the reply that survived
+        // cancellation) came to the trigger threshold. It is the number to tune against.
+        recorder.log(.turn, "conversation closed",
+                     detail: String(format: "%@ · peak level %.3f", reason, peak))
+    }
+
+    /// Someone started talking while the conversation was open.
+    private func speechDetectedWhileOpen() {
+        guard conversationOpen else { return }
+        recorder.log(.command, "speech while open",
+                     detail: String(format: "peak %.3f", voiceActivity.observedPeak))
+        closeConversation(reason: "user spoke")
+        cue(.listening)
+        Task { await startTurnInterrupting() }
     }
 
     /// Start a turn, cutting off whatever is playing first.
@@ -467,13 +531,19 @@ final class SessionCoordinator: ObservableObject {
             latencySummary = summary
 
             phase = .speaking
+            // Listen from the moment it starts talking, so you can cut in mid-sentence.
+            openConversation()
             try await audio.play(mp3: result.mp3)
+            // Reply finished on its own. Hold the door open before requiring the phrase.
+            if conversationOpen { startFollowUpCountdown() }
             // Cutting playback short resumes the player normally, so the cancel only
             // surfaces here.
             try Task.checkCancellation()
 
             phase = .idle
         } catch {
+            // Whatever went wrong, do not leave the detector holding the mic open.
+            closeConversation(reason: "turn ended abnormally")
             if Self.isCancellation(error) {
                 gblog("[ASK] cancelled")
                 outcome = "cancelled"
