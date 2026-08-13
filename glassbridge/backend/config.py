@@ -9,6 +9,13 @@ class Settings:
     anthropic_api_key: str
     elevenlabs_api_key: str
 
+    # Speech to text. "auto" uses Groq when a key is present and falls back to local
+    # Whisper when it isn't, so the default works either way. Whisper dominates the
+    # latency budget (5-8s of a 4-13s round trip); Groq is typically under a second.
+    stt_provider: str = "auto"          # auto | groq | whisper
+    groq_api_key: str = ""
+    groq_stt_model: str = "whisper-large-v3-turbo"
+
     whisper_model: str = "distil-large-v3"
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
@@ -50,6 +57,9 @@ class Settings:
         return cls(
             anthropic_api_key=anthropic_key,
             elevenlabs_api_key=eleven_key,
+            stt_provider=os.environ.get("STT_PROVIDER", cls.stt_provider),
+            groq_api_key=os.environ.get("GROQ_API_KEY", "").strip(),
+            groq_stt_model=os.environ.get("GROQ_STT_MODEL", cls.groq_stt_model),
             whisper_model=os.environ.get("WHISPER_MODEL", cls.whisper_model),
             whisper_device=os.environ.get("WHISPER_DEVICE", cls.whisper_device),
             whisper_compute_type=os.environ.get("WHISPER_COMPUTE", cls.whisper_compute_type),

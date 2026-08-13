@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import Settings
 from .llm import ClaudeVision, Turn
 from .sessions import SessionStore
-from .stt import WhisperTranscriber
+from .stt import Transcriber, make_transcriber
 from .tts import ElevenLabsStreamingTTS
 
 logger = logging.getLogger("glassbridge")
@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 class AppState:
     settings: Settings
-    transcriber: WhisperTranscriber
+    transcriber: Transcriber
     llm: ClaudeVision
     tts: ElevenLabsStreamingTTS
     sessions: SessionStore
@@ -34,12 +34,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state = AppState()
     state.settings = settings
 
-    state.transcriber = WhisperTranscriber(
-        model_name=settings.whisper_model,
-        device=settings.whisper_device,
-        compute_type=settings.whisper_compute_type,
-    )
-    # Heavy CPU load — push to a thread so startup isn't blocking the event loop.
+    state.transcriber = make_transcriber(settings)
+    # Whisper's warmup is a heavy model load, so push it to a thread rather than block the
+    # event loop. Groq's is a log line, and costs nothing to run the same way.
     await anyio.to_thread.run_sync(state.transcriber.warmup)
 
     state.llm = ClaudeVision(
