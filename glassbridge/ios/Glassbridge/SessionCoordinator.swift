@@ -210,13 +210,32 @@ final class SessionCoordinator: ObservableObject {
     func runTestAsk() async {
         guard !isBusy else { return }
         isBusy = true
-        defer { isBusy = false }
+        // Recorded like a real turn. There is no camera or mic in the simulator, so this
+        // is the only way to check the recorder end to end, including the JSON write,
+        // without standing in a room wearing the glasses.
+        recorder.begin(route: audio.routeSummary())
+        var outcome = "completed"
+        var stt: Double?
+        var llm: Double?
+        defer {
+            isBusy = false
+            recorder.finish(
+                outcome: outcome,
+                transcript: transcript.isEmpty ? nil : transcript,
+                reply: reply.isEmpty ? nil : reply,
+                stt: stt,
+                llm: llm
+            )
+        }
         do {
             phase = .listening
             captureSource = "automated test (stub image + silent wav + text_override)"
             guard let image = MockSetup.stubImageData(), !image.isEmpty else {
+                outcome = "error: no stub image"
                 phase = .error("test: no stub image"); return
             }
+            cue(.captured)
+            recorder.log(.capture, "stub photo", detail: "\(image.count) bytes")
             phase = .thinking
             let silent = MockSetup.silentWAV()
             let result = try await backend.ask(
@@ -226,6 +245,12 @@ final class SessionCoordinator: ObservableObject {
                 textOverride: "Describe this image in one short spoken sentence.",
                 model: selectedModel.rawValue.isEmpty ? nil : selectedModel.rawValue
             )
+            stt = result.sttLatency
+            llm = result.llmLatency
+            recorder.log(.backend, "reply", detail: String(
+                format: "stt %.2fs · llm %.2fs · %d mp3 bytes",
+                result.sttLatency ?? 0, result.llmLatency ?? 0, result.mp3.count
+            ))
             transcript = result.transcript ?? ""
             reply = result.reply ?? ""
             print("[TEST] reply: \(reply)")
@@ -236,6 +261,7 @@ final class SessionCoordinator: ObservableObject {
             print("[TEST] DONE — pipeline OK")
         } catch {
             print("[TEST] FAILED: \(error)")
+            outcome = "error: \(error.localizedDescription)"
             phase = .error(error.localizedDescription)
         }
     }

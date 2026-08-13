@@ -10,7 +10,7 @@ enum AppConfig {
         #if targetEnvironment(simulator)
         return URL(string: "http://127.0.0.1:8082")!
         #else
-        return URL(string: "http://192.168.4.43:8082")! // Mac's current LAN IP (en0)
+        return URL(string: "http://192.168.3.156:8082")! // Mac's current LAN IP (en0)
         #endif
     }()
 
