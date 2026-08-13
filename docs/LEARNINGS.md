@@ -160,7 +160,7 @@ Next time you sit down to extend this:
 2. **Copy `.env.example` to `.env`**, paste real Anthropic + ElevenLabs keys.
 3. **Update `ios/Glassbridge/Config.swift`** — set `backendURL` to `http://<your-mac-lan-ip>:8082` for the physical-device branch.
 4. **Set your Apple team** in `ios/project.yml` (`DEVELOPMENT_TEAM`).
-5. **Backend**: `cd glassbridge && ./run.sh`. First boot downloads Whisper (~600 MB, ~30–60 s).
+5. **Backend**: `./run.sh` from the repo root. First boot downloads Whisper (~600 MB, ~30–60 s).
 6. **iOS**: `cd ios && xcodegen generate && open Glassbridge.xcodeproj`, build to your iPhone.
 7. **First launch** on iPhone: trust the dev profile (Settings → General → VPN & Device Management).
 8. **Tap ASK** — should work with iPhone camera + iPhone mic immediately. No glasses pairing needed.

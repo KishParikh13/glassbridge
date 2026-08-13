@@ -25,7 +25,7 @@ iPhone cam ─┘                         ├── Whisper STT (faster-whisper,
 ### 1. Start the backend
 
 ```bash
-cd glassbridge
+cd glassbridge   # repo root
 cp .env.example .env
 # Edit .env, paste:
 #   ANTHROPIC_API_KEY=sk-ant-...

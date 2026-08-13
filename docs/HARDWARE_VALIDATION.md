@@ -12,7 +12,7 @@ iPhone → Glassbridge → recordings**, then AirDrop the folder to the Mac.
 
 ## Setup
 
-1. Backend up: `cd glassbridge && ./run.sh`. Wait for the Whisper load line.
+1. Backend up: `./run.sh` from the repo root. Wait for the Whisper load line.
 2. `ios/Glassbridge/Config.swift` → `backendURL` points at your Mac's LAN IP, not
    `127.0.0.1`. The phone cannot reach localhost.
 3. `cd ios && xcodegen generate`, build to the iPhone.
