@@ -96,6 +96,10 @@ final class GlassesController: ObservableObject {
         let stamp = ISO8601DateFormatter().string(from: Date()).suffix(8)
         debugLog.append("\(stamp) \(s)")
         if debugLog.count > 16 { debugLog.removeFirst(debugLog.count - 16) }
+        // Also to the durable log. This ring buffer only survives while the app is in the
+        // foreground and holds 16 lines, which is useless for a failure that happens while
+        // you are wearing the glasses and looking at something else.
+        gblog("[GLASSES] \(s)")
     }
 
     // MARK: - Lifecycle
@@ -371,9 +375,13 @@ final class GlassesController: ObservableObject {
             stateToken = stream.statePublisher.listen { [weak self] state in
                 Task { @MainActor in self?.handleStreamState(state) }
             }
+            log("stream created, photo publisher attached")
             photoToken = stream.photoDataPublisher.listen { [weak self] photoData in
                 let data = photoData.data
-                Task { @MainActor in self?.deliverPhoto(.success(data)) }
+                Task { @MainActor in
+                    self?.log("photoDataPublisher fired: \(data.count) bytes")
+                    self?.deliverPhoto(.success(data))
+                }
             }
             errorToken = stream.errorPublisher.listen { [weak self] err in
                 Task { @MainActor in self?.handleStreamError(err) }
@@ -428,6 +436,9 @@ final class GlassesController: ObservableObject {
     }
 
     func stopStreaming() {
+        // Logged because tearing the stream down mid-capture would drop the photo, and
+        // "the picture was taken but never arrived" looks identical either way.
+        log("stopStreaming (photo pending: \(photoContinuation != nil))")
         teardownStream()
         updateConnectionState()
     }
@@ -530,11 +541,13 @@ final class GlassesController: ObservableObject {
         try await waitUntilStreaming(timeout: timeout)
 
         let t0 = Date()
+        log("capturePhoto: streamState=\(String(describing: streamState)) startedForPhoto=\(startedForPhoto)")
         let data: Data = try await withCheckedThrowingContinuation { cont in
             photoLock.lock()
             self.photoContinuation = cont
             photoLock.unlock()
             let queued = stream.capturePhoto(format: .jpeg)
+            log("capturePhoto queued=\(queued), waiting up to \(Int(timeout))s")
             if !queued {
                 self.deliverPhoto(.failure(NSError(
                     domain: "GlassesController", code: 4,
