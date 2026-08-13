@@ -53,6 +53,11 @@ class Settings:
 
     history_turns: int = 3
 
+    # The trigger phrase for the built-in agent. Additional agents declare their own in
+    # agents.json, and the device fetches all of them from GET /agents.
+    wake_phrase: str = "hey glass"
+
+
     @classmethod
     def from_env(cls) -> "Settings":
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
@@ -80,6 +85,7 @@ class Settings:
             ),
             port=int(os.environ.get("PORT", cls.port)),
             host=os.environ.get("HOST", cls.host),
+            wake_phrase=os.environ.get("GB_WAKE_PHRASE", cls.wake_phrase),
             enable_web_search=_env_bool("GB_WEB_SEARCH", cls.enable_web_search),
             enable_local_tools=_env_bool("GB_LOCAL_TOOLS", cls.enable_local_tools),
         )

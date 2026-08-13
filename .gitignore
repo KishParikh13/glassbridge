@@ -37,3 +37,6 @@ reference/
 .idea/
 *.swp
 *.swo
+
+# Agent config can carry tokens; ship the example, not the real one.
+agents.json

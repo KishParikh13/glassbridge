@@ -86,7 +86,12 @@ final class SessionCoordinator: ObservableObject {
     private let liveActivity = LiveActivityController()
     private let earcons = Earcons()
     let recorder = SessionRecorder()
+    let agentDirectory = AgentDirectory()
     private var isBusy = false
+
+    /// Which assistant the current turn is for, decided by the wake phrase that started
+    /// it. Nil means the backend's default.
+    private var currentAgentId: String?
 
     /// The turn in flight, held so a spoken "never mind" can cancel it.
     private var turnTask: Task<Void, Never>?
@@ -169,9 +174,17 @@ final class SessionCoordinator: ObservableObject {
         if UserDefaults.standard.bool(forKey: wakeWordKey) {
             setWakeWord(true, announce: false)
         }
+        // Which agents exist, and what phrase reaches each, is the backend's to decide.
+        Task { await refreshAgents() }
         #if DEBUG
         maybeRunAutomatedTestAtLaunch()
         #endif
+    }
+
+    /// Ask the backend which assistants exist and arm a trigger phrase for each.
+    func refreshAgents() async {
+        await agentDirectory.refresh()
+        wake.setWakePhrases(agentDirectory.wakePhrases)
     }
 
     // MARK: – Onboarding / permissions / backend
@@ -265,7 +278,8 @@ final class SessionCoordinator: ObservableObject {
                 imageJPEG: image,
                 sessionId: AppConfig.sessionId,
                 textOverride: "Describe this image in one short spoken sentence.",
-                model: selectedModel.rawValue.isEmpty ? nil : selectedModel.rawValue
+                model: selectedModel.rawValue.isEmpty ? nil : selectedModel.rawValue,
+                agent: currentAgentId
             )
             stt = result.sttLatency
             llm = result.llmLatency
@@ -334,7 +348,8 @@ final class SessionCoordinator: ObservableObject {
 
     /// Every entry point comes through here, so there is exactly one turn in flight and
     /// exactly one handle on it for a spoken "never mind" to cancel.
-    private func runTurn(presetImage: Data?, textOverride: String? = nil) async {
+    private func runTurn(presetImage: Data?, textOverride: String? = nil,
+                         agentId: String? = nil) async {
         guard !isBusy else { return }
         isBusy = true
         suppressCancelCue = false
@@ -345,6 +360,7 @@ final class SessionCoordinator: ObservableObject {
         photoTask?.cancel()
         photoTask = nil
 
+        currentAgentId = agentId
         turnGeneration += 1
         let myGeneration = turnGeneration
         let task = Task { await performAsk(presetImage: presetImage, textOverride: textOverride) }
@@ -412,7 +428,8 @@ final class SessionCoordinator: ObservableObject {
                      detail: String(format: "peak %.3f", voiceActivity.observedPeak))
         closeConversation(reason: "user spoke")
         cue(.listening)
-        Task { await startTurnInterrupting() }
+        // A follow-up belongs to whoever was just talking.
+        Task { await startTurnInterrupting(agentId: currentAgentId) }
     }
 
     /// Start a turn, cutting off whatever is playing first.
@@ -420,7 +437,7 @@ final class SessionCoordinator: ObservableObject {
     /// Saying the trigger phrase over a reply means "I have heard enough, here is the next
     /// question". Stopping playback lets the current turn finish on its own terms rather
     /// than unwinding as a cancel, so no error cue fires.
-    private func startTurnInterrupting() async {
+    private func startTurnInterrupting(agentId: String?) async {
         if let current = turnTask {
             audio.stopPlayback()
             _ = await current.value
@@ -430,7 +447,7 @@ final class SessionCoordinator: ObservableObject {
             photoTask = nil
             isBusy = false
         }
-        await runTurn(presetImage: nil)
+        await runTurn(presetImage: nil, agentId: agentId)
     }
 
     private func performAsk(presetImage: Data?, textOverride: String? = nil) async {
@@ -538,7 +555,8 @@ final class SessionCoordinator: ObservableObject {
                 contextFramesJPEG: [],
                 sessionId: AppConfig.sessionId,
                 textOverride: textOverride,
-                model: selectedModel.rawValue.isEmpty ? nil : selectedModel.rawValue
+                model: selectedModel.rawValue.isEmpty ? nil : selectedModel.rawValue,
+                agent: currentAgentId
             )
             earcons.stopThinking()
             try Task.checkCancellation()
@@ -752,7 +770,7 @@ final class SessionCoordinator: ObservableObject {
             wake.onObservation = { [weak self] observation in
                 self?.recorder.log(
                     .heard,
-                    observation.command.rawValue,
+                    observation.command.name,
                     detail: observation.transcript,
                     armed: observation.armed,
                     scope: observation.scope.names
@@ -771,11 +789,11 @@ final class SessionCoordinator: ObservableObject {
     /// The spoken control surface. Which of these can fire at any given moment is settled
     /// by `syncListenerScope`, so nothing here has to second-guess the phase.
     private func handle(_ command: WakeWordListener.Command) {
-        recorder.log(.command, command.rawValue)
+        recorder.log(.command, command.name)
         switch command {
-        case .wake:
+        case .wake(let agentId):
             cue(.listening)
-            Task { await startTurnInterrupting() }
+            Task { await startTurnInterrupting(agentId: agentId) }
         case .cancel:
             cancelTurn()
         case .stopSpeaking:

@@ -11,7 +11,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings
-from .llm import ClaudeVision, Turn
+from .llm import ClaudeVision
+from .agents import AgentError, AgentRegistry, build_registry
 from .sessions import SessionStore
 from .stt import Transcriber, make_transcriber
 from .tts import ElevenLabsStreamingTTS
@@ -26,6 +27,7 @@ class AppState:
     llm: ClaudeVision
     tts: ElevenLabsStreamingTTS
     sessions: SessionStore
+    agents: AgentRegistry
 
 
 @asynccontextmanager
@@ -54,9 +56,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         output_format=settings.elevenlabs_output_format,
     )
     state.sessions = SessionStore(max_turns=settings.history_turns)
+    state.agents = build_registry(settings, state.llm, state.sessions)
 
     app.state.gb = state
-    logger.info("Glassbridge ready on %s:%d", settings.host, settings.port)
+    logger.info(
+        "Glassbridge ready on %s:%d — agents: %s",
+        settings.host,
+        settings.port,
+        ", ".join(f"{s.id} ({s.wake_phrase!r})" for s in state.agents.specs()),
+    )
     yield
 
 
@@ -66,6 +74,20 @@ app = FastAPI(title="Glassbridge", lifespan=lifespan)
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/agents")
+async def agents_list() -> dict[str, object]:
+    """What the glasses can talk to, and the phrase that reaches each one.
+
+    The device calls this at launch and arms a trigger phrase per entry, which is what
+    makes adding an assistant a config edit rather than an app release.
+    """
+    state: AppState = app.state.gb
+    return {
+        "default": state.agents.default.spec.id,
+        "agents": [spec.as_dict() for spec in state.agents.specs()],
+    }
 
 
 @app.post("/ask")
@@ -78,6 +100,8 @@ async def ask(
     session_id: str | None = Form(default=None),
     text_override: str | None = Form(default=None),
     model: str | None = Form(default=None),
+    # Which assistant to route to; see GET /agents. Absent means the built-in one.
+    agent: str | None = Form(default=None),
 ) -> StreamingResponse:
     state: AppState = app.state.gb
     t_start = time.perf_counter()
@@ -109,31 +133,33 @@ async def ask(
         transcript_lang = result.language
         logger.info("STT %.2fs lang=%s: %r", t_stt, transcript_lang, user_text[:80])
 
-    history = state.sessions.get(session_id)
+    # Which assistant answers. The device sends the id that matches the wake phrase it
+    # heard; an unknown id falls back to the built-in agent rather than failing the turn.
+    selected = state.agents.get(agent)
+    images = [*context_bytes, image_bytes] if image_bytes else list(context_bytes)
 
     t0 = time.perf_counter()
-    reply = await anyio.to_thread.run_sync(
-        lambda: state.llm.ask(
-            user_text=user_text,
-            image_bytes=image_bytes,
-            image_media_type=(image.content_type if image is not None else None) or "image/jpeg",
-            history=history,
-            context_images=context_bytes,
-            session_id=session_id,
-            model=model,
+    try:
+        reply = await anyio.to_thread.run_sync(
+            lambda: selected.respond(
+                text=user_text,
+                images=images,
+                session_id=session_id or "",
+                model=model,
+            )
         )
-    )
+    except AgentError as exc:
+        # Phrased to be spoken aloud: this comes back through the glasses, not a console.
+        logger.warning("Agent %s failed: %s", selected.spec.id, exc)
+        raise HTTPException(502, str(exc)) from exc
     t_llm = time.perf_counter() - t0
     logger.info(
-        "LLM %.2fs in=%d out=%d tools=%s reply=%r",
+        "AGENT %s %.2fs meta=%s reply=%r",
+        selected.spec.id,
         t_llm,
-        reply.input_tokens,
-        reply.output_tokens,
-        ",".join(reply.tools_used) or "-",
+        {k: v for k, v in reply.meta.items() if k != "agent"},
         reply.text[:120],
     )
-
-    state.sessions.append(session_id, Turn(user_text=user_text, assistant_text=reply.text))
 
     async def stream_mp3() -> AsyncIterator[bytes]:
         # ElevenLabs SDK is sync; bridge each chunk through a worker thread.
@@ -167,7 +193,8 @@ async def ask(
         "X-Glassbridge-Lang": transcript_lang,
         "X-Glassbridge-Latency-Stt": f"{t_stt:.3f}",
         "X-Glassbridge-Latency-Llm": f"{t_llm:.3f}",
-        "X-Glassbridge-Tools": quote(",".join(reply.tools_used), safe=""),
+        "X-Glassbridge-Tools": quote(str(reply.meta.get("tools") or ""), safe=""),
+        "X-Glassbridge-Agent": quote(selected.spec.id, safe=""),
         "Cache-Control": "no-store",
     }
     return StreamingResponse(stream_mp3(), media_type="audio/mpeg", headers=headers)

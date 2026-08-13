@@ -24,9 +24,26 @@ final class WakeWordListener: ObservableObject {
         }
     }
 
-    enum Command: String, Hashable {
-        /// The trigger phrase. Starts a turn.
-        case wake
+    /// One trigger phrase and the agent it reaches.
+    ///
+    /// These come from the backend's `GET /agents` rather than being compiled in, so
+    /// adding an assistant is a config edit on the server. The device arms whatever it is
+    /// told about.
+    struct WakePhrase: Equatable {
+        let agentId: String
+        let phrase: String
+        let words: [String]
+
+        init(agentId: String, phrase: String) {
+            self.agentId = agentId
+            self.phrase = phrase.lowercased()
+            self.words = WakeWordListener.words(in: phrase)
+        }
+    }
+
+    enum Command: Hashable {
+        /// A trigger phrase. Starts a turn with the agent that phrase belongs to.
+        case wake(agentId: String)
         /// "never mind". Drops whatever is in flight.
         case cancel
         /// "stop". Cuts a reply short without dropping the turn.
@@ -50,6 +67,17 @@ final class WakeWordListener: ObservableObject {
             case .stopSpeaking: return .stopSpeaking
             case .sleep: return .sleep
             case .look: return .look
+            }
+        }
+
+        /// Stable name for logs and recordings.
+        var name: String {
+            switch self {
+            case .wake(let agentId): return "wake:\(agentId)"
+            case .cancel: return "cancel"
+            case .stopSpeaking: return "stopSpeaking"
+            case .sleep: return "sleep"
+            case .look: return "look"
             }
         }
     }
@@ -110,8 +138,9 @@ final class WakeWordListener: ObservableObject {
     var onCommand: ((Command) -> Void)?
     var onObservation: ((Observation) -> Void)?
 
-    private let phrase: String
-    private let phraseWords: [String]
+    /// Longest phrase first, so "hey glass studio" would win over "hey glass" rather than
+    /// the shorter one swallowing it.
+    private var wakePhrases: [WakePhrase]
     private let recognizer = SFSpeechRecognizer()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
@@ -137,11 +166,27 @@ final class WakeWordListener: ObservableObject {
     ]
 
     init(phrase: String = "hey glass") {
-        self.phrase = phrase.lowercased()
-        self.phraseWords = Self.words(in: phrase)
+        self.wakePhrases = [WakePhrase(agentId: "glass", phrase: phrase)]
     }
 
-    var triggerPhrase: String { phrase }
+    /// Replace the armed phrases, normally from `GET /agents`.
+    ///
+    /// Falls back to whatever is already armed if handed nothing, so a backend that is
+    /// unreachable at launch leaves the glasses still answering to the built-in phrase
+    /// instead of going deaf.
+    func setWakePhrases(_ phrases: [WakePhrase]) {
+        guard !phrases.isEmpty else { return }
+        let sorted = phrases.sorted { $0.words.count > $1.words.count }
+        guard sorted != wakePhrases else { return }
+        wakePhrases = sorted
+        gblog("[WAKE] armed phrases: \(sorted.map { "\($0.phrase) → \($0.agentId)" }.joined(separator: ", "))")
+        if enabled { restart() }
+    }
+
+    /// The default agent's phrase, for UI that shows a single example.
+    var triggerPhrase: String { wakePhrases.last?.phrase ?? "hey glass" }
+
+    var allTriggerPhrases: [String] { wakePhrases.map(\.phrase) }
 
     func start() {
         guard !enabled else { return }
@@ -290,12 +335,14 @@ final class WakeWordListener: ObservableObject {
         lastHeard = transcript.lowercased()
 
         let heard = Self.words(in: transcript)
-        if Self.contains(phraseWords, in: heard) {
-            observe(transcript, .wake)
+        for wake in wakePhrases where Self.contains(wake.words, in: heard) {
+            let command = Command.wake(agentId: wake.agentId)
+            observe(transcript, command)
             if scope.contains(.wake) {
-                fire(.wake)
+                fire(command)
                 return
             }
+            break
         }
         for entry in Self.controlPhrases {
             guard Self.contains(entry.words, in: heard) else { continue }
@@ -324,7 +371,7 @@ final class WakeWordListener: ObservableObject {
         // Ignore everything else this task produces. The words that just fired stay in the
         // transcript as it grows, and without this they would fire again on every partial.
         consumed = true
-        gblog("[VOICE] \(command)")
+        gblog("[VOICE] \(command.name)")
         // The handler usually changes the scope, which restarts recognition for us. If it
         // did not, clear the buffer ourselves rather than sit on a spent transcript.
         onCommand?(command)
@@ -365,7 +412,7 @@ final class WakeWordListener: ObservableObject {
 
     // MARK: - Matching
 
-    private static func words(in text: String) -> [String] {
+    nonisolated static func words(in text: String) -> [String] {
         text.lowercased()
             .split { !$0.isLetter && !$0.isNumber }
             .map(String.init)

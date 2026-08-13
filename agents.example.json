@@ -1,0 +1,50 @@
+{
+  "//": [
+    "Agents the glasses can talk to. Copy to agents.json to activate.",
+    "",
+    "The built-in 'glass' agent (Claude with eyes + web search) is always registered and",
+    "does not appear here. Everything listed below is an ADDITIONAL agent reached by its",
+    "own wake phrase. The iOS app fetches GET /agents at launch and arms a trigger phrase",
+    "for each one, so adding an assistant is an edit here plus a backend restart. No app",
+    "rebuild, no Swift.",
+    "",
+    "type 'gateway' speaks to any HTTP endpoint that accepts a JSON POST and answers with",
+    "newline-delimited JSON events: {type:'text',text:...} lines and a final",
+    "{type:'done',text:...}. Field names are configurable for services that differ.",
+    "",
+    "The agent owns its own memory. It receives a stable threadId per conversation and",
+    "decides what that means, so Glassbridge sends no history to gateway agents."
+  ],
+  "agents": [
+    {
+      "id": "kishos",
+      "label": "KishOS",
+      "wakePhrase": "hey kishos",
+      "description": "The personal chief of staff: corpus, ledger, goals, and its own tools.",
+      "type": "gateway",
+      "url": "http://127.0.0.1:17890/chat",
+      "healthUrl": "http://127.0.0.1:17890/health",
+      "tokenFile": "~/.kishos/secrets/shared-secret",
+      "acceptsImages": false,
+      "timeoutSeconds": 90,
+      "threadPrefix": "glassbridge",
+      "context": "This question came in by voice through smart glasses and your answer will be read aloud into the user's ear, not shown on a screen. Reply in at most two short spoken sentences. No markdown, no asterisks, no bullet points, no headings. If the full answer is long, give the single most useful part and stop."
+    },
+    {
+      "//": "Example of pointing at somebody else's assistant. Delete or edit freely.",
+      "id": "example",
+      "label": "Example Assistant",
+      "wakePhrase": "hey example",
+      "type": "gateway",
+      "url": "https://assistant.example.com/v1/chat",
+      "token": "put-a-bearer-token-here-or-use-tokenFile",
+      "acceptsImages": false,
+      "textField": "message",
+      "threadField": "conversation_id",
+      "replyField": "text",
+      "extraBody": {
+        "stream": true
+      }
+    }
+  ]
+}

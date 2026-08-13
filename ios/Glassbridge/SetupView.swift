@@ -27,6 +27,7 @@ struct SetupView: View {
                 }
 
                 statusSection
+                agentsSection
                 handsFreeSection
                 if !coordinator.recorder.recent.isEmpty { recentSection }
                 selfTestSection
@@ -53,7 +54,10 @@ struct SetupView: View {
                 coordinator.refreshAudioRoute()
                 glasses.refreshPermissions()
                 coordinator.recorder.loadRecent()
-                Task { await coordinator.checkBackend() }
+                Task {
+                    await coordinator.checkBackend()
+                    await coordinator.refreshAgents()
+                }
             }
         }
     }
@@ -131,6 +135,49 @@ struct SetupView: View {
             : ("Unreachable", .orange)
     }
 
+    // MARK: Agents
+
+    /// Who you can talk to and the phrase that reaches each one.
+    ///
+    /// The list comes from the backend, so this is a view of configuration rather than of
+    /// anything compiled into the app. Adding an assistant makes it appear here.
+    @ViewBuilder
+    private var agentsSection: some View {
+        Section {
+            ForEach(coordinator.agentDirectory.agents) { agent in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text("\u{201C}\(agent.wakePhrase)\u{201D}")
+                            .font(.callout.weight(.medium))
+                        Spacer()
+                        Text(agent.label)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if agent.acceptsImages {
+                            Image(systemName: "eye")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if !agent.description.isEmpty {
+                        Text(agent.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        } header: {
+            Text("Agents")
+        } footer: {
+            if let error = coordinator.agentDirectory.lastError {
+                Text("Couldn't reach the backend for the agent list, so only the built-in phrase is armed. \(error)")
+            } else {
+                Text("Configured on the backend in agents.json. An eye means that agent can see what you're looking at when you say \u{201C}look\u{201D}.")
+            }
+        }
+    }
+
     // MARK: Hands-free
 
     private var handsFreeSection: some View {
@@ -148,6 +195,7 @@ struct SetupView: View {
             }
 
             // Three rows rather than the three-sentence paragraph this replaces.
+            LabeledContent("\u{201C}look\u{201D}", value: "Attach what you see")
             LabeledContent("\u{201C}never mind\u{201D}", value: "Drop the turn")
             LabeledContent("\u{201C}stop\u{201D}", value: "Cut the reply short")
             LabeledContent("\u{201C}go to sleep\u{201D}", value: "Switch this off")
