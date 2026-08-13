@@ -17,6 +17,13 @@ final class WakeWordListener: ObservableObject {
         case off, listening, denied, unavailable
     }
 
+    private enum StartError: LocalizedError {
+        case noInputYet
+        var errorDescription: String? {
+            "No microphone input on the current route yet."
+        }
+    }
+
     enum Command: String, Hashable {
         /// The trigger phrase. Starts a turn.
         case wake
@@ -112,6 +119,9 @@ final class WakeWordListener: ObservableObject {
     private var generation = 0         // stale recognition callbacks drop themselves
     private var consumed = false       // a command already fired on this transcript
     private var reported: Set<Command> = []   // matches already logged for this task
+    private var retryAttempt = 0       // consecutive failed starts
+    private var retryTask: Task<Void, Never>?
+    private var routeObserver: NSObjectProtocol?
 
     /// Checked in order, so a longer phrase wins over a shorter one that overlaps it.
     private static let controlPhrases: [(command: Command, words: [String])] = [
@@ -142,6 +152,7 @@ final class WakeWordListener: ObservableObject {
                     return
                 }
                 self.enabled = true
+                self.observeRouteChanges()
                 self.beginTask()
             }
         }
@@ -149,8 +160,56 @@ final class WakeWordListener: ObservableObject {
 
     func stop() {
         enabled = false
+        retryTask?.cancel()
+        retryTask = nil
+        retryAttempt = 0
+        if let routeObserver {
+            NotificationCenter.default.removeObserver(routeObserver)
+            self.routeObserver = nil
+        }
         teardown()
         state = .off
+    }
+
+    /// Try again after a failed start, backing off.
+    ///
+    /// The failures that matter here are transient: another Bluetooth device takes the
+    /// route, the glasses fold, the session activates a moment before an input attaches.
+    /// Before this, one of those at launch left the wake word dead for the rest of the
+    /// session with no indication beyond it silently not working.
+    private func scheduleRetry() {
+        guard enabled, retryTask == nil else { return }
+        retryAttempt += 1
+        let delay = min(8.0, 0.5 * pow(2.0, Double(retryAttempt - 1)))
+        gblog("[WAKE] retry \(retryAttempt) in \(String(format: "%.1f", delay))s")
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.retryTask = nil
+            guard self.enabled, self.state != .listening else { return }
+            self.beginTask()
+        }
+    }
+
+    /// Routes change constantly in this product: glasses fold, AirPods connect, a call
+    /// arrives. Any of those can hand us an input where there was none, so treat a route
+    /// change as a free retry rather than waiting out the backoff.
+    private func observeRouteChanges() {
+        guard routeObserver == nil else { return }
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.enabled, self.state != .listening else { return }
+                gblog("[WAKE] route changed while not listening — retrying")
+                self.retryTask?.cancel()
+                self.retryTask = nil
+                self.retryAttempt = 0
+                self.beginTask()
+            }
+        }
     }
 
     /// Change what the listener is armed for. Restarts recognition so words already
@@ -173,6 +232,14 @@ final class WakeWordListener: ObservableObject {
         }
         do {
             try AudioSessionController.shared.activate()
+
+            // The session reports an active route before an input is necessarily attached,
+            // which happens routinely when another Bluetooth device (AirPods) takes over
+            // and leaves an A2DP output with no microphone. Starting the tap then throws.
+            // Treat it as "not yet" and retry, rather than as fatal.
+            guard MicrophoneHub.shared.inputFormat.sampleRate > 0 else {
+                throw StartError.noInputYet
+            }
 
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.shouldReportPartialResults = true
@@ -207,10 +274,12 @@ final class WakeWordListener: ObservableObject {
                 }
             }
             state = .listening
+            retryAttempt = 0
         } catch {
             gblog("[WAKE] could not start listening: \(error.localizedDescription)")
             state = .unavailable
             teardown()
+            scheduleRetry()
         }
     }
 
