@@ -389,7 +389,7 @@ final class SessionCoordinator: ObservableObject {
         // gblog, not recorder.log: this window outlives the turn recording, and anything
         // logged after `finish` was being silently dropped — which is how the peak levels
         // this exists to measure went missing.
-        gblog("[OPEN] listening (threshold \(String(format: "%.3f", voiceActivity.threshold)))")
+        gblog("[OPEN] listening (adaptive floor tracking)")
         recorder.log(.turn, "conversation open")
     }
 
@@ -410,22 +410,29 @@ final class SessionCoordinator: ObservableObject {
         followUpTimer?.cancel()
         followUpTimer = nil
         conversationOpen = false
-        let peak = voiceActivity.observedPeak
+        let levels = voiceActivity.levels
         voiceActivity.stop()
         // The peak is how close the room (and any echo of the reply that survived
         // cancellation) came to the trigger threshold. It is the number to tune against,
         // so it goes to the durable log rather than a turn recording that may be closed.
-        gblog(String(format: "[OPEN] closed: %@ · peak %.3f vs threshold %.3f",
-                     reason, peak, voiceActivity.threshold))
+        // peakWhilePlaying is the echo measurement: if .voiceChat cancellation works it
+        // stays near the floor, and that is what makes barge-in safe to be sensitive.
+        gblog(String(format: "[OPEN] closed: %@ · peak %.4f · echo %.4f · floor %.4f · trigger %.4f",
+                     reason, levels.peak, levels.peakWhilePlaying, levels.floor, levels.trigger))
         recorder.log(.turn, "conversation closed",
-                     detail: String(format: "%@ · peak level %.3f", reason, peak))
+                     detail: String(format: "%@ · peak %.4f echo %.4f floor %.4f trigger %.4f",
+                                    reason, levels.peak, levels.peakWhilePlaying,
+                                    levels.floor, levels.trigger))
     }
 
     /// Someone started talking while the conversation was open.
     private func speechDetectedWhileOpen() {
         guard conversationOpen else { return }
         recorder.log(.command, "speech while open",
-                     detail: String(format: "peak %.3f", voiceActivity.observedPeak))
+                     detail: String(format: "peak %.4f floor %.4f trigger %.4f",
+                                    voiceActivity.levels.peak,
+                                    voiceActivity.levels.floor,
+                                    voiceActivity.levels.trigger))
         closeConversation(reason: "user spoke")
         cue(.listening)
         // A follow-up belongs to whoever was just talking.
@@ -583,7 +590,9 @@ final class SessionCoordinator: ObservableObject {
             phase = .speaking
             // Listen from the moment it starts talking, so you can cut in mid-sentence.
             openConversation()
+            voiceActivity.setPlaying(true)
             try await audio.play(mp3: result.mp3)
+            voiceActivity.setPlaying(false)
             // Reply finished on its own. Hold the door open before requiring the phrase.
             if conversationOpen { startFollowUpCountdown() }
             // Cutting playback short resumes the player normally, so the cancel only

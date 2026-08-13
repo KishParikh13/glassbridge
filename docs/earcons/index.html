@@ -1,0 +1,89 @@
+<title>Glassbridge earcons</title>
+<style>
+ :root{--ink:#e9ecee;--dim:#9aa2a6;--line:#242a2d;--bg:#0d1113;--card:#141a1d;--accent:#64d2ff}
+ *{box-sizing:border-box}
+ body{margin:0;padding:40px 24px 80px;background:var(--bg);color:var(--ink);
+      font:15px/1.55 -apple-system,"SF Pro Text",system-ui,sans-serif}
+ .wrap{max-width:1080px;margin:0 auto}
+ h1{font-size:22px;margin:0 0 6px;letter-spacing:-.02em}
+ .sub{color:var(--dim);margin:0 0 28px;max-width:70ch;font-size:14px}
+ .note{background:var(--card);border:1px solid var(--line);border-radius:12px;
+       padding:14px 16px;margin:0 0 28px;color:var(--dim);font-size:13.5px;max-width:78ch}
+ .note b{color:var(--ink)}
+ table{width:100%;border-collapse:collapse;margin-bottom:34px}
+ th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+ th{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);font-weight:600}
+ .cue{font-weight:650}
+ .why{color:var(--dim);font-size:13px;margin-top:2px}
+ button{background:var(--card);color:var(--ink);border:1px solid var(--line);
+        border-radius:9px;padding:8px 14px;font-size:13.5px;font-weight:600;cursor:pointer;
+        min-width:104px}
+ button:hover{border-color:var(--accent);color:var(--accent)}
+ button:active{transform:translateY(1px)}
+ .ms{color:var(--dim);font-size:11.5px;font-variant-numeric:tabular-nums;margin-left:8px}
+ h2{font-size:15px;margin:30px 0 4px;letter-spacing:-.01em}
+ h2 .tag{color:var(--accent);font-size:11px;text-transform:uppercase;letter-spacing:.09em;
+         margin-left:10px;font-weight:600}
+ .setnote{color:var(--dim);font-size:13.5px;margin:0 0 12px;max-width:76ch}
+ .seq{margin-bottom:8px}
+</style>
+<div class="wrap">
+<h1>Earcon options</h1>
+<p class="sub">Three complete sets. Listen on the glasses if you can, or anything small and
+tinny — they are designed for a speaker inches from an open microphone, and laptop speakers
+flatter them.</p>
+<div class="note">
+<b>What they are designed against.</b> Every cue is under 400ms, because a sound that
+outlasts the thing it announces is a delay. All of them sit between roughly 300&nbsp;Hz and
+2&nbsp;kHz: below that the glasses' HFP link rolls them off, above that they read as an
+alarm. The two pairs that must never be confused are <b>heard you / dropped it</b> and
+<b>got the shot / still working</b>, so each set inverts the contour rather than only
+moving the pitch. <b>Still working</b> repeats every 1.6s and is deliberately the quietest
+thing here.
+</div>
+
+<h2>Glass<span class="tag">set a</span></h2>
+<p class="setnote">Pure sine intervals, currently shipping. Clean and neutral, closest to iOS system sounds. Reads as 'a device acknowledged you'.</p>
+<div class="seq"><button onclick="seq('a-glass')">▶ Play a whole turn</button><span class="ms">heard you → got the shot → still working ×2 → reply → dropped it</span></div>
+<table><tr><th>Cue</th><th>Means</th><th></th></tr>
+<tr><td><div class="cue">Heard you</div><div class="why">Wake fired. The turn has started and it is recording.</div></td><td style="color:var(--dim);font-size:13px">listening</td><td><button onclick="p('a-glass-listening.wav')">▶ Play</button><span class="ms">160 ms</span></td></tr>
+<tr><td><div class="cue">Got the shot</div><div class="why">A photo landed. This is the one that tells you to stop holding still.</div></td><td style="color:var(--dim);font-size:13px">captured</td><td><button onclick="p('a-glass-captured.wav')">▶ Play</button><span class="ms">45 ms</span></td></tr>
+<tr><td><div class="cue">Still working</div><div class="why">Repeats every 1.6s, and only after 1.2s, so a fast reply is silent.</div></td><td style="color:var(--dim);font-size:13px">thinking</td><td><button onclick="p('a-glass-thinking.wav')">▶ Play</button><span class="ms">40 ms</span></td></tr>
+<tr><td><div class="cue">Dropped it</div><div class="why">You said never mind, or the turn was abandoned.</div></td><td style="color:var(--dim);font-size:13px">cancelled</td><td><button onclick="p('a-glass-cancelled.wav')">▶ Play</button><span class="ms">160 ms</span></td></tr>
+<tr><td><div class="cue">Something broke</div><div class="why">The backend failed or the agent could not answer.</div></td><td style="color:var(--dim);font-size:13px">error</td><td><button onclick="p('a-glass-error.wav')">▶ Play</button><span class="ms">230 ms</span></td></tr>
+<tr><td><div class="cue">Going quiet</div><div class="why">You said go to sleep. The wake word is off until you turn it back on.</div></td><td style="color:var(--dim);font-size:13px">asleep</td><td><button onclick="p('a-glass-asleep.wav')">▶ Play</button><span class="ms">340 ms</span></td></tr>
+<tr><td><div class="cue">Listening again</div><div class="why">The wake word was switched back on.</div></td><td style="color:var(--dim);font-size:13px">awake</td><td><button onclick="p('a-glass-awake.wav')">▶ Play</button><span class="ms">300 ms</span></td></tr>
+</table>
+<h2>Warm<span class="tag">set b</span></h2>
+<p class="setnote">Same intervals on a softer two-partial timbre with slower fades. Reads as a chime rather than a beep. Kinder in a quiet room, marginally less cutting on a street.</p>
+<div class="seq"><button onclick="seq('b-warm')">▶ Play a whole turn</button><span class="ms">heard you → got the shot → still working ×2 → reply → dropped it</span></div>
+<table><tr><th>Cue</th><th>Means</th><th></th></tr>
+<tr><td><div class="cue">Heard you</div><div class="why">Wake fired. The turn has started and it is recording.</div></td><td style="color:var(--dim);font-size:13px">listening</td><td><button onclick="p('b-warm-listening.wav')">▶ Play</button><span class="ms">190 ms</span></td></tr>
+<tr><td><div class="cue">Got the shot</div><div class="why">A photo landed. This is the one that tells you to stop holding still.</div></td><td style="color:var(--dim);font-size:13px">captured</td><td><button onclick="p('b-warm-captured.wav')">▶ Play</button><span class="ms">50 ms</span></td></tr>
+<tr><td><div class="cue">Still working</div><div class="why">Repeats every 1.6s, and only after 1.2s, so a fast reply is silent.</div></td><td style="color:var(--dim);font-size:13px">thinking</td><td><button onclick="p('b-warm-thinking.wav')">▶ Play</button><span class="ms">50 ms</span></td></tr>
+<tr><td><div class="cue">Dropped it</div><div class="why">You said never mind, or the turn was abandoned.</div></td><td style="color:var(--dim);font-size:13px">cancelled</td><td><button onclick="p('b-warm-cancelled.wav')">▶ Play</button><span class="ms">190 ms</span></td></tr>
+<tr><td><div class="cue">Something broke</div><div class="why">The backend failed or the agent could not answer.</div></td><td style="color:var(--dim);font-size:13px">error</td><td><button onclick="p('b-warm-error.wav')">▶ Play</button><span class="ms">260 ms</span></td></tr>
+<tr><td><div class="cue">Going quiet</div><div class="why">You said go to sleep. The wake word is off until you turn it back on.</div></td><td style="color:var(--dim);font-size:13px">asleep</td><td><button onclick="p('b-warm-asleep.wav')">▶ Play</button><span class="ms">380 ms</span></td></tr>
+<tr><td><div class="cue">Listening again</div><div class="why">The wake word was switched back on.</div></td><td style="color:var(--dim);font-size:13px">awake</td><td><button onclick="p('b-warm-awake.wav')">▶ Play</button><span class="ms">340 ms</span></td></tr>
+</table>
+<h2>Tactile<span class="tag">set c</span></h2>
+<p class="setnote">Struck bell tones and pitch glides. Acknowledgement rises like a question, cancel falls like a shrug. The most physical of the three and the least like a computer.</p>
+<div class="seq"><button onclick="seq('c-tactile')">▶ Play a whole turn</button><span class="ms">heard you → got the shot → still working ×2 → reply → dropped it</span></div>
+<table><tr><th>Cue</th><th>Means</th><th></th></tr>
+<tr><td><div class="cue">Heard you</div><div class="why">Wake fired. The turn has started and it is recording.</div></td><td style="color:var(--dim);font-size:13px">listening</td><td><button onclick="p('c-tactile-listening.wav')">▶ Play</button><span class="ms">130 ms</span></td></tr>
+<tr><td><div class="cue">Got the shot</div><div class="why">A photo landed. This is the one that tells you to stop holding still.</div></td><td style="color:var(--dim);font-size:13px">captured</td><td><button onclick="p('c-tactile-captured.wav')">▶ Play</button><span class="ms">35 ms</span></td></tr>
+<tr><td><div class="cue">Still working</div><div class="why">Repeats every 1.6s, and only after 1.2s, so a fast reply is silent.</div></td><td style="color:var(--dim);font-size:13px">thinking</td><td><button onclick="p('c-tactile-thinking.wav')">▶ Play</button><span class="ms">50 ms</span></td></tr>
+<tr><td><div class="cue">Dropped it</div><div class="why">You said never mind, or the turn was abandoned.</div></td><td style="color:var(--dim);font-size:13px">cancelled</td><td><button onclick="p('c-tactile-cancelled.wav')">▶ Play</button><span class="ms">140 ms</span></td></tr>
+<tr><td><div class="cue">Something broke</div><div class="why">The backend failed or the agent could not answer.</div></td><td style="color:var(--dim);font-size:13px">error</td><td><button onclick="p('c-tactile-error.wav')">▶ Play</button><span class="ms">290 ms</span></td></tr>
+<tr><td><div class="cue">Going quiet</div><div class="why">You said go to sleep. The wake word is off until you turn it back on.</div></td><td style="color:var(--dim);font-size:13px">asleep</td><td><button onclick="p('c-tactile-asleep.wav')">▶ Play</button><span class="ms">240 ms</span></td></tr>
+<tr><td><div class="cue">Listening again</div><div class="why">The wake word was switched back on.</div></td><td style="color:var(--dim);font-size:13px">awake</td><td><button onclick="p('c-tactile-awake.wav')">▶ Play</button><span class="ms">220 ms</span></td></tr>
+</table>
+
+<script>
+ function p(f){ const a=new Audio(f); a.play(); }
+ function seq(set){
+   const steps=[['listening',0],['captured',700],['thinking',1500],['thinking',3100],['cancelled',4600]];
+   steps.forEach(([cue,delay])=>setTimeout(()=>p(set+'-'+cue+'.wav'),delay));
+ }
+</script>
+</div>
