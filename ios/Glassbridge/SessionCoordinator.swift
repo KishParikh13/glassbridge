@@ -188,9 +188,35 @@ final class SessionCoordinator: ObservableObject {
         // Which agents exist, and what phrase reaches each, is the backend's to decide.
         Task { await refreshAgents() }
         #if DEBUG
+        applyScreenshotLaunchOptions()
         maybeRunAutomatedTestAtLaunch()
         #endif
     }
+
+    #if DEBUG
+    /// Launch options for driving the simulator to a screen.
+    ///
+    /// The simulator cannot be tapped from a script, so capturing a particular screen means
+    /// launching straight into it. Useful for case-study screenshots and for eyeballing a
+    /// layout without clicking through onboarding every time.
+    ///
+    ///     SIMCTL_CHILD_GB_SKIP_ONBOARDING=1 SIMCTL_CHILD_GB_SCREEN=agent \
+    ///       xcrun simctl launch booted com.kish.glassbridge
+    private func applyScreenshotLaunchOptions() {
+        let env = ProcessInfo.processInfo.environment
+        if env["GB_SKIP_ONBOARDING"] == "1" {
+            hasCompletedOnboarding = true
+            UserDefaults.standard.set(true, forKey: onboardingKey)
+            selectedTab = .live
+        }
+        if let screen = env["GB_SCREEN"]?.lowercased(), !screen.isEmpty {
+            screenshotScreen = screen
+        }
+    }
+
+    /// Set by `GB_SCREEN`. The views read it once on appear and navigate accordingly.
+    @Published var screenshotScreen: String?
+    #endif
 
     /// Ask the backend which assistants exist and arm a trigger phrase for each.
     func refreshAgents() async {
@@ -280,6 +306,7 @@ final class SessionCoordinator: ObservableObject {
                 outcome = "error: no stub image"
                 phase = .error("test: no stub image"); return
             }
+            askImage = image
             cue(.captured)
             recorder.log(.capture, "stub photo", detail: "\(image.count) bytes")
             phase = .thinking

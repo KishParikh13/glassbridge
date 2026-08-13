@@ -14,9 +14,17 @@ struct SetupView: View {
     @ObservedObject var glasses: GlassesController
     @ObservedObject var wake: WakeWordListener
     @Environment(\.dismiss) private var dismiss
+    /// Used to push a detail screen from a launch argument. Harmless otherwise.
+    @State private var path: [Detail] = []
+
+    /// The pushable detail screens, as values rather than closures, so they can be reached
+    /// programmatically as well as by tapping.
+    enum Detail: String, Hashable {
+        case glasses, iphone, agent, advanced
+    }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Form {
                 if !coordinator.hasCompletedOnboarding {
                     Section {
@@ -33,9 +41,15 @@ struct SetupView: View {
                 selfTestSection
 
                 Section {
-                    NavigationLink("Advanced") {
-                        AdvancedView(coordinator: coordinator, glasses: glasses, wake: wake)
-                    }
+                    NavigationLink("Advanced", value: Detail.advanced)
+                }
+            }
+            .navigationDestination(for: Detail.self) { detail in
+                switch detail {
+                case .glasses:  GlassesDetailView(coordinator: coordinator, glasses: glasses)
+                case .iphone:   PhoneDetailView(coordinator: coordinator)
+                case .agent:    AgentDetailView(coordinator: coordinator)
+                case .advanced: AdvancedView(coordinator: coordinator, glasses: glasses, wake: wake)
                 }
             }
             .navigationTitle("Settings")
@@ -58,6 +72,13 @@ struct SetupView: View {
                     await coordinator.checkBackend()
                     await coordinator.refreshAgents()
                 }
+                #if DEBUG
+                if let screen = coordinator.screenshotScreen,
+                   let detail = Detail(rawValue: screen) {
+                    path = [detail]
+                    coordinator.screenshotScreen = nil
+                }
+                #endif
             }
         }
     }
@@ -69,25 +90,19 @@ struct SetupView: View {
     /// the capability matrix, which were four renderings of the same five facts.
     private var statusSection: some View {
         Section("Status") {
-            NavigationLink {
-                GlassesDetailView(coordinator: coordinator, glasses: glasses)
-            } label: {
+            NavigationLink(value: Detail.glasses) {
                 LabeledContent("Ray-Ban glasses") {
                     Text(glassesStatus.0).foregroundStyle(glassesStatus.1)
                 }
             }
 
-            NavigationLink {
-                PhoneDetailView(coordinator: coordinator)
-            } label: {
+            NavigationLink(value: Detail.iphone) {
                 LabeledContent("iPhone") {
                     Text(phoneStatus.0).foregroundStyle(phoneStatus.1)
                 }
             }
 
-            NavigationLink {
-                AgentDetailView(coordinator: coordinator)
-            } label: {
+            NavigationLink(value: Detail.agent) {
                 LabeledContent("Agent") {
                     Text(agentStatus.0).foregroundStyle(agentStatus.1)
                 }
@@ -180,6 +195,11 @@ struct SetupView: View {
 
     // MARK: Hands-free
 
+    private var defaultWakePhrase: String {
+        let directory = coordinator.agentDirectory
+        return directory.agent(id: directory.defaultAgentId)?.wakePhrase ?? "hey glass"
+    }
+
     private var handsFreeSection: some View {
         Section {
             Toggle(isOn: Binding(
@@ -188,7 +208,10 @@ struct SetupView: View {
             )) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Wake word")
-                    Text("Say \u{201C}\(wake.triggerPhrase)\u{201D} to start, anytime")
+                    // The default agent's phrase, from the directory. The listener sorts
+                    // its phrases longest-first for matching, so asking it which one to
+                    // show returns whichever happened to sort last.
+                    Text("Say \u{201C}\(defaultWakePhrase)\u{201D} to start, anytime")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

@@ -12,6 +12,9 @@ struct LiveView: View {
 
     @State private var showSetup = false
     @State private var showResponseSheet = false
+    /// Sheet height. Large whenever a turn is running, since that is when the sheet has
+    /// the most in it.
+    @State private var sheetDetent: PresentationDetent = .large
     @State private var prompt = ""
     @State private var followUpPrompt = ""
     @State private var stagedMedia: CapturedMedia?
@@ -54,12 +57,20 @@ struct LiveView: View {
                     prompt: $followUpPrompt,
                     onSend: sendFollowUp
                 )
-                .presentationDetents([.medium, .large])
+                // Medium was right when this was two text bubbles. It now carries an
+                // attached photo, the live transcript, and a working state, which do not
+                // fit — the answer arrived below the fold and looked like nothing happened.
+                .presentationDetents([.medium, .large], selection: $sheetDetent)
                 .presentationDragIndicator(.visible)
             }
             .task { await coordinator.checkBackend() }
             .onAppear {
                 if !coordinator.hasCompletedOnboarding { showSetup = true }
+                #if DEBUG
+                // GB_SCREEN targets a Settings sub-screen, which is only reachable once the
+                // sheet is up.
+                if coordinator.screenshotScreen != nil { showSetup = true }
+                #endif
             }
             .onChange(of: coordinator.hasCompletedOnboarding) { _, completed in
                 showSetup = !completed
@@ -679,6 +690,7 @@ private struct ChatResponseSheet: View {
     @FocusState private var focused: Bool
     @State private var animateDots = false
     @State private var dotPhase: Double = 0
+    private let bottomAnchor = "gb.chat.bottom"
 
     /// Drives the working dots. A repeatForever animation cannot express a travelling
     /// phase offset across three views, so the phase is stepped instead.
@@ -687,6 +699,7 @@ private struct ChatResponseSheet: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
                         // What was actually sent. Seeing the frame is the only way to tell
@@ -720,10 +733,21 @@ private struct ChatResponseSheet: View {
                                 .font(.system(.caption2, design: .monospaced))
                                 .foregroundStyle(.secondary)
                         }
+                        // Scroll anchor.
+                        Color.clear.frame(height: 1).id(bottomAnchor)
                     }
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .animation(.easeInOut(duration: 0.2), value: coordinator.phase)
+                }
+                // An attached photo is tall enough to push the answer off screen, so the
+                // reply would arrive below the fold and look like nothing happened.
+                .onChange(of: coordinator.reply) { _, _ in
+                    withAnimation { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
+                }
+                .onChange(of: coordinator.phase) { _, _ in
+                    withAnimation { proxy.scrollTo(bottomAnchor, anchor: .bottom) }
+                }
                 }
 
                 HStack(spacing: 10) {
@@ -809,7 +833,7 @@ private struct ChatResponseSheet: View {
                 .resizable()
                 .scaledToFill()
                 .frame(maxWidth: .infinity)
-                .frame(height: 190)
+                .frame(height: 160)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .strokeBorder(Color.secondary.opacity(0.25), lineWidth: 0.5))
