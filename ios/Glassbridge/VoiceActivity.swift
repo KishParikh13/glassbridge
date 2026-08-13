@@ -14,11 +14,14 @@ import Foundation
 final class VoiceActivityDetector: @unchecked Sendable {
 
     struct Options {
-        /// RMS above this counts as someone talking. Deliberately well above
-        /// `MicRecorder`'s silence threshold: this has to survive whatever echo of the
-        /// reply leaks past `.voiceChat` cancellation, and a false trigger here cuts off
-        /// an answer you were listening to.
-        var threshold: Float = 0.06
+        /// RMS above this counts as someone talking.
+        ///
+        /// It sits above `MicRecorder`'s 0.015 silence floor, because a false trigger cuts
+        /// off an answer you were listening to, but not far above: HFP from the glasses is
+        /// narrowband and quiet, and the first guess of 0.06 was high enough that talking
+        /// over a reply never registered. Every window logs the peak it saw against this
+        /// number, so it can be tuned from evidence.
+        var threshold: Float = 0.03
         /// How long it has to stay loud. Filters door slams and the earcons themselves.
         var sustain: TimeInterval = 0.22
     }
@@ -43,6 +46,8 @@ final class VoiceActivityDetector: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return sinkID != nil
     }
+
+    var threshold: Float { options.threshold }
 
     /// Highest RMS observed while running. Used to tune the threshold against real echo
     /// rather than guesswork.

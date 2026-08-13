@@ -370,6 +370,10 @@ final class SessionCoordinator: ObservableObject {
         followUpTimer?.cancel()
         conversationOpen = true
         voiceActivity.start()
+        // gblog, not recorder.log: this window outlives the turn recording, and anything
+        // logged after `finish` was being silently dropped — which is how the peak levels
+        // this exists to measure went missing.
+        gblog("[OPEN] listening (threshold \(String(format: "%.3f", voiceActivity.threshold)))")
         recorder.log(.turn, "conversation open")
     }
 
@@ -393,7 +397,10 @@ final class SessionCoordinator: ObservableObject {
         let peak = voiceActivity.observedPeak
         voiceActivity.stop()
         // The peak is how close the room (and any echo of the reply that survived
-        // cancellation) came to the trigger threshold. It is the number to tune against.
+        // cancellation) came to the trigger threshold. It is the number to tune against,
+        // so it goes to the durable log rather than a turn recording that may be closed.
+        gblog(String(format: "[OPEN] closed: %@ · peak %.3f vs threshold %.3f",
+                     reason, peak, voiceActivity.threshold))
         recorder.log(.turn, "conversation closed",
                      detail: String(format: "%@ · peak level %.3f", reason, peak))
     }
@@ -488,10 +495,23 @@ final class SessionCoordinator: ObservableObject {
                 if let photoTask {
                     // Usually already finished: "look" lands mid-sentence and the capture
                     // has been running ever since.
-                    image = try await photoTask.value
-                    cue(.captured)
-                    recorder.log(.capture, "photo",
-                                 detail: "\(image?.count ?? 0) bytes · \(captureSource)")
+                    //
+                    // A photo that never arrives must not destroy the question. The
+                    // glasses camera sits right on the timeout boundary (5.5s when it
+                    // works, 7s when it gives up), and losing a good question to a slow
+                    // shutter is far worse than answering without the picture.
+                    do {
+                        let captured = try await photoTask.value
+                        image = captured
+                        cue(.captured)
+                        recorder.log(.capture, "photo",
+                                     detail: "\(captured.count) bytes · \(captureSource)")
+                    } catch {
+                        gblog("[CAPTURE] photo failed, answering without it: \(error.localizedDescription)")
+                        recorder.log(.capture, "photo failed",
+                                     detail: "answering without it · \(error.localizedDescription)")
+                        captureSource += " (photo failed)"
+                    }
                 }
             }
 

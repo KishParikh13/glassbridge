@@ -72,8 +72,10 @@ final class WakeWordListener: ObservableObject {
         /// Recording the question. "stop" is deliberately absent: it would fire on the
         /// question itself. "look" is armed because this is exactly when you say it.
         static let capturing: Scope = [.cancel, .sleep, .look]
-        /// Waiting on the backend. Too late to ask for a photo, the audio is already sent.
-        static let thinking: Scope = [.cancel, .sleep]
+        /// Waiting on the backend. Too late to ask for a photo, the audio is already sent,
+        /// but the trigger phrase is armed: saying it while it thinks means "forget that,
+        /// here is a different question", and being ignored there just feels broken.
+        static let thinking: Scope = [.wake, .cancel, .sleep]
         /// A reply is playing, so "stop" finally has something to mean. The trigger phrase
         /// is armed too: talking over the answer to ask the next thing is the whole point
         /// of barge-in, and waiting politely for it to finish is not a conversation.
