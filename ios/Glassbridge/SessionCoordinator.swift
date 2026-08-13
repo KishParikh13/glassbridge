@@ -451,6 +451,18 @@ final class SessionCoordinator: ObservableObject {
         do {
             if textOverride == nil {
                 phase = .listening
+                // Warm the camera while the question is still being asked.
+                //
+                // capturePhoto cold-starts the stream and tears it down again after every
+                // shot, so each "look" paid the full spin-up and then had only the
+                // remainder of its timeout to actually shoot. That is why it took 5.5s the
+                // once it worked and timed out the rest of the time. Starting here gives
+                // it the length of the question as a head start, and it costs nothing on
+                // turns where "look" is never said: no frame is captured or sent, and
+                // stopGlassesIfTransient shuts it down at the end of the turn either way.
+                if glasses.canCaptureFromGlasses, !glasses.isStreaming {
+                    Task { await glasses.startStreaming() }
+                }
                 try await audio.activateForGlasses()
                 // The route at `begin` is the pre-activation one, which is not the number
                 // that matters. Activation is what is supposed to pull the glasses off
