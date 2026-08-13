@@ -97,6 +97,9 @@ final class SessionCoordinator: ObservableObject {
     /// blocked) killed the whole turn on a 7 second timeout.
     private var photoTask: Task<Data, Error>?
 
+    /// Bumped per turn so a turn that gets barged in on can tell it is no longer current.
+    private var turnGeneration = 0
+
     @Published var wakeWordEnabled = false
     @Published var captureSource: String = "auto"
     @Published var selectedTab: Tab = .live
@@ -326,12 +329,37 @@ final class SessionCoordinator: ObservableObject {
         // Each turn decides for itself whether it needs eyes.
         photoTask?.cancel()
         photoTask = nil
+
+        turnGeneration += 1
+        let myGeneration = turnGeneration
         let task = Task { await performAsk(presetImage: presetImage, textOverride: textOverride) }
         turnTask = task
         await task.value
+
+        // A barge-in may have already torn this turn down and started the next one. Only
+        // clean up if we are still the current turn, or we would clear the new one's state.
+        guard turnGeneration == myGeneration else { return }
         turnTask = nil
         photoTask = nil
         isBusy = false
+    }
+
+    /// Start a turn, cutting off whatever is playing first.
+    ///
+    /// Saying the trigger phrase over a reply means "I have heard enough, here is the next
+    /// question". Stopping playback lets the current turn finish on its own terms rather
+    /// than unwinding as a cancel, so no error cue fires.
+    private func startTurnInterrupting() async {
+        if let current = turnTask {
+            audio.stopPlayback()
+            _ = await current.value
+            // Its own cleanup may not have run yet, and the ordering is not guaranteed.
+            // Claim the slot here so the guard in runTurn cannot drop this wake.
+            turnTask = nil
+            photoTask = nil
+            isBusy = false
+        }
+        await runTurn(presetImage: nil)
     }
 
     private func performAsk(presetImage: Data?, textOverride: String? = nil) async {
@@ -645,7 +673,7 @@ final class SessionCoordinator: ObservableObject {
         switch command {
         case .wake:
             cue(.listening)
-            Task { await runTurn(presetImage: nil) }
+            Task { await startTurnInterrupting() }
         case .cancel:
             cancelTurn()
         case .stopSpeaking:

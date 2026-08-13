@@ -67,8 +67,10 @@ final class WakeWordListener: ObservableObject {
         static let capturing: Scope = [.cancel, .sleep, .look]
         /// Waiting on the backend. Too late to ask for a photo, the audio is already sent.
         static let thinking: Scope = [.cancel, .sleep]
-        /// A reply is playing, so "stop" finally has something to mean.
-        static let speaking: Scope = [.cancel, .stopSpeaking, .sleep]
+        /// A reply is playing, so "stop" finally has something to mean. The trigger phrase
+        /// is armed too: talking over the answer to ask the next thing is the whole point
+        /// of barge-in, and waiting politely for it to finish is not a conversation.
+        static let speaking: Scope = [.wake, .cancel, .stopSpeaking, .sleep]
 
         /// Readable in a log, which is where this mostly gets looked at.
         var names: String {
