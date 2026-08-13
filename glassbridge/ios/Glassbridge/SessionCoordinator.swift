@@ -141,6 +141,7 @@ final class SessionCoordinator: ObservableObject {
         hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "gb.hasCompletedOnboarding")
         glasses.start()
         refreshPermissionStatuses()
+        gblog("[LAUNCH] backend=\(AppConfig.backendURL.absoluteString) mic=\(micPermission) camera=\(cameraPermission) speech=\(speechPermission)")
         if !hasCompletedOnboarding { selectedTab = .setup }
         // "Go to sleep" is meant to stick. The listener comes back exactly as you left it
         // rather than resetting to off, or to on, on every launch.
@@ -200,7 +201,7 @@ final class SessionCoordinator: ObservableObject {
         let envHit = ProcessInfo.processInfo.environment["GB_AUTO_TEST"] == "1"
         let argHit = ProcessInfo.processInfo.arguments.contains("--gb-auto-test")
         guard envHit || argHit else { return }
-        print("[TEST] auto-test trigger detected (env=\(envHit) arg=\(argHit))")
+        gblog("[TEST] auto-test trigger detected (env=\(envHit) arg=\(argHit))")
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await self?.runTestAsk()
@@ -253,14 +254,14 @@ final class SessionCoordinator: ObservableObject {
             ))
             transcript = result.transcript ?? ""
             reply = result.reply ?? ""
-            print("[TEST] reply: \(reply)")
-            print("[TEST] mp3 bytes: \(result.mp3.count)")
+            gblog("[TEST] reply: \(reply)")
+            gblog("[TEST] mp3 bytes: \(result.mp3.count)")
             phase = .speaking
             try? await audio.play(mp3: result.mp3)
             phase = .idle
-            print("[TEST] DONE — pipeline OK")
+            gblog("[TEST] DONE — pipeline OK")
         } catch {
-            print("[TEST] FAILED: \(error)")
+            gblog("[TEST] FAILED: \(error)")
             outcome = "error: \(error.localizedDescription)"
             phase = .error(error.localizedDescription)
         }
@@ -309,7 +310,7 @@ final class SessionCoordinator: ObservableObject {
     }
 
     private func performAsk(presetImage: Data?, textOverride: String? = nil) async {
-        print("[ASK] start wakeWord=\(wakeWordEnabled)")
+        gblog("[ASK] start wakeWord=\(wakeWordEnabled)")
         // The listener deliberately keeps running for the whole turn now. Pausing it here
         // is what used to make a reply impossible to interrupt.
         defer { earcons.stopThinking() }
@@ -327,6 +328,11 @@ final class SessionCoordinator: ObservableObject {
             if textOverride == nil {
                 phase = .listening
                 try await audio.activateForGlasses()
+                // The route at `begin` is the pre-activation one, which is not the number
+                // that matters. Activation is what is supposed to pull the glasses off
+                // A2DP (output only) onto a profile that actually carries a microphone.
+                recorder.log(.route, "after activation", detail: audio.routeSummary())
+                recorder.log(.route, "available inputs", detail: audio.availableInputsSummary())
             }
 
             let useGlasses = glasses.canCaptureFromGlasses
@@ -415,12 +421,12 @@ final class SessionCoordinator: ObservableObject {
             phase = .idle
         } catch {
             if Self.isCancellation(error) {
-                print("[ASK] cancelled")
+                gblog("[ASK] cancelled")
                 outcome = "cancelled"
                 if !suppressCancelCue { cue(.cancelled) }
                 phase = .idle
             } else {
-                print("[ASK] failed: \(error.localizedDescription)")
+                gblog("[ASK] failed: \(error.localizedDescription)")
                 outcome = "error: \(error.localizedDescription)"
                 cue(.error)
                 phase = .error(error.localizedDescription)
@@ -463,6 +469,8 @@ final class SessionCoordinator: ObservableObject {
                 at: 0)
             stopGlassesIfTransient()
         } catch {
+            // Direct capture never starts a turn, so this is the only trace it leaves.
+            gblog("[CAPTURE] photo failed (glasses=\(useGlasses)): \(error.localizedDescription)")
             captureError = error.localizedDescription
         }
     }
@@ -578,6 +586,7 @@ final class SessionCoordinator: ObservableObject {
     private var suppressCancelCue = false
 
     func setWakeWord(_ on: Bool, announce: Bool = true) {
+        gblog("[WAKE] set enabled=\(on) · speechPermission=\(speechPermission) · route=\(audio.routeSummary())")
         wakeWordEnabled = on
         UserDefaults.standard.set(on, forKey: wakeWordKey)
         if on {

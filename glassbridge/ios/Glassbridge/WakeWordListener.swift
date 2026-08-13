@@ -119,7 +119,11 @@ final class WakeWordListener: ObservableObject {
         SFSpeechRecognizer.requestAuthorization { [weak self] auth in
             Task { @MainActor in
                 guard let self else { return }
-                guard auth == .authorized else { self.state = .denied; return }
+                guard auth == .authorized else {
+                    gblog("[WAKE] speech recognition not authorized (\(auth.rawValue)) — listener stays off")
+                    self.state = .denied
+                    return
+                }
                 self.enabled = true
                 self.beginTask()
             }
@@ -145,7 +149,11 @@ final class WakeWordListener: ObservableObject {
 
     private func beginTask() {
         guard enabled else { return }
-        guard let recognizer, recognizer.isAvailable else { state = .unavailable; return }
+        guard let recognizer, recognizer.isAvailable else {
+            gblog("[WAKE] recognizer unavailable (locale or on-device model missing)")
+            state = .unavailable
+            return
+        }
         do {
             try AudioSessionController.shared.activate()
 
@@ -183,6 +191,7 @@ final class WakeWordListener: ObservableObject {
             }
             state = .listening
         } catch {
+            gblog("[WAKE] could not start listening: \(error.localizedDescription)")
             state = .unavailable
             teardown()
         }
@@ -227,7 +236,7 @@ final class WakeWordListener: ObservableObject {
         // Ignore everything else this task produces. The words that just fired stay in the
         // transcript as it grows, and without this they would fire again on every partial.
         consumed = true
-        print("[VOICE] \(command)")
+        gblog("[VOICE] \(command)")
         // The handler usually changes the scope, which restarts recognition for us. If it
         // did not, clear the buffer ourselves rather than sit on a spent transcript.
         onCommand?(command)

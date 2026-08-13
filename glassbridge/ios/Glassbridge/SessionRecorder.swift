@@ -114,11 +114,12 @@ final class SessionRecorder: ObservableObject {
             scope: scope
         )
         current?.events.append(event)
-        print(String(format: "[REC] %6.2fs %@ %@%@",
+        gblog(String(format: "[REC] %6.2fs %@ %@%@%@",
                      event.at,
                      kind.rawValue,
                      label,
-                     detail.map { " · \($0)" } ?? ""))
+                     detail.map { " · \($0)" } ?? "",
+                     armed == false ? " [NOT ARMED, scope=\(scope ?? "?")]" : ""))
     }
 
     // MARK: - Export
@@ -133,9 +134,9 @@ final class SessionRecorder: ObservableObject {
         let url = Self.directory.appendingPathComponent("turn-\(stamp).json")
         do {
             try encoder.encode(recording).write(to: url)
-            print("[REC] wrote \(url.lastPathComponent) (\(recording.events.count) events)")
+            gblog("[REC] wrote \(url.lastPathComponent) (\(recording.events.count) events)")
         } catch {
-            print("[REC] write failed: \(error.localizedDescription)")
+            gblog("[REC] write failed: \(error.localizedDescription)")
         }
     }
 
