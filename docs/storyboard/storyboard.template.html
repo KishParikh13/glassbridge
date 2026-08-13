@@ -1,0 +1,685 @@
+<title>Glassbridge: Look, Ask, Hear</title>
+<style>
+  :root {
+    --ground: #E7EAEE;
+    --surface: #FFFFFF;
+    --surface-2: #F1F4F7;
+    --ink: #131A22;
+    --ink-2: #46525E;
+    --muted: #6E7B88;
+    --line: #D3D9E0;
+    --line-strong: #B9C2CC;
+    --signal: #A8660A;
+    --signal-ink: #6E4206;
+    --signal-soft: #F7E7CC;
+    --live: #1B7A58;
+    --live-soft: #D9EFE6;
+    --alert: #A8352C;
+    --alert-soft: #F6DEDB;
+    --shadow: 0 1px 2px rgba(19, 26, 34, .06), 0 8px 24px rgba(19, 26, 34, .07);
+
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+    --step--1: clamp(.72rem, .69rem + .12vw, .78rem);
+    --step-0: clamp(.95rem, .92rem + .16vw, 1.03rem);
+    --step-1: clamp(1.14rem, 1.06rem + .35vw, 1.35rem);
+    --step-2: clamp(1.45rem, 1.28rem + .7vw, 1.95rem);
+    --step-3: clamp(2.1rem, 1.6rem + 2.1vw, 3.6rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0E141A;
+      --surface: #161E27;
+      --surface-2: #1C2730;
+      --ink: #E9EEF3;
+      --ink-2: #AFBBC7;
+      --muted: #7C8A97;
+      --line: #28333E;
+      --line-strong: #3A4854;
+      --signal: #E8A33D;
+      --signal-ink: #F2C480;
+      --signal-soft: #33270F;
+      --live: #47C295;
+      --live-soft: #113228;
+      --alert: #E4695E;
+      --alert-soft: #351916;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .34);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0E141A;
+    --surface: #161E27;
+    --surface-2: #1C2730;
+    --ink: #E9EEF3;
+    --ink-2: #AFBBC7;
+    --muted: #7C8A97;
+    --line: #28333E;
+    --line-strong: #3A4854;
+    --signal: #E8A33D;
+    --signal-ink: #F2C480;
+    --signal-soft: #33270F;
+    --live: #47C295;
+    --live-soft: #113228;
+    --alert: #E4695E;
+    --alert-soft: #351916;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px rgba(0, 0, 0, .34);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--step-0);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 78rem;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 1rem + 2.5vw, 4rem) clamp(1.1rem, .6rem + 2vw, 3rem) 5rem;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--signal);
+    margin: 0;
+  }
+
+  h1 {
+    font-size: var(--step-3);
+    line-height: .98;
+    letter-spacing: -.035em;
+    font-weight: 800;
+    text-wrap: balance;
+    margin: .5rem 0 0;
+  }
+
+  h2 {
+    font-size: var(--step-2);
+    line-height: 1.1;
+    letter-spacing: -.022em;
+    font-weight: 750;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  h3 { font-size: var(--step-1); line-height: 1.2; letter-spacing: -.014em; font-weight: 700; margin: 0; }
+
+  p { margin: 0; }
+  .prose { max-width: 62ch; color: var(--ink-2); }
+
+  .masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 1.4rem;
+    padding-bottom: 2.4rem;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .standfirst {
+    font-size: var(--step-1);
+    line-height: 1.45;
+    color: var(--ink-2);
+    max-width: 46ch;
+    text-wrap: pretty;
+  }
+
+  .standfirst b { color: var(--ink); font-weight: 650; }
+
+  .specs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 2.2rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+  }
+
+  .specs span { display: flex; gap: .5rem; }
+  .specs b { color: var(--ink); font-weight: 500; }
+
+  section { margin-top: clamp(3rem, 2rem + 3vw, 5rem); }
+
+  .section-head { display: flex; flex-direction: column; gap: .7rem; margin-bottom: 1.8rem; }
+
+  /* ---------- pipeline ---------- */
+
+  .pipe-scroll { overflow-x: auto; padding-bottom: .5rem; }
+
+  .pipe {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(9.5rem, 1fr));
+    gap: .5rem;
+    min-width: 48rem;
+  }
+
+  .stage {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: .95rem 1rem 1.05rem;
+    display: flex;
+    flex-direction: column;
+    gap: .35rem;
+    position: relative;
+  }
+
+  .stage::after {
+    content: "";
+    position: absolute;
+    right: -.5rem;
+    top: 50%;
+    width: .5rem;
+    height: 1px;
+    background: var(--line-strong);
+  }
+
+  .stage:last-child::after { display: none; }
+
+  .stage-n { font-family: var(--mono); font-size: .68rem; letter-spacing: .12em; color: var(--signal); }
+  .stage-name { font-weight: 680; letter-spacing: -.01em; }
+  .stage-note { font-family: var(--mono); font-size: var(--step--1); color: var(--muted); line-height: 1.4; }
+
+  .stage[data-where="phone"] { border-left: 2px solid var(--line-strong); }
+  .stage[data-where="mac"] { border-left: 2px solid var(--signal); }
+
+  .pipe-key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1.4rem;
+    margin-top: 1rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+  }
+
+  .pipe-key i { font-style: normal; display: flex; align-items: center; gap: .5rem; }
+  .pipe-key i::before { content: ""; width: .7rem; height: 2px; background: var(--line-strong); }
+  .pipe-key i.mac::before { background: var(--signal); }
+
+  /* ---------- storyboard plates ---------- */
+
+  .frames { display: flex; flex-direction: column; gap: 1.4rem; }
+
+  .frame {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+
+  .plate { margin: 0; position: relative; background: #0E141A; }
+
+  .plate img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 3 / 2;
+    object-fit: cover;
+  }
+
+  .plate figcaption {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    display: flex;
+    align-items: baseline;
+    gap: .7rem;
+    padding: .5rem .85rem;
+    background: rgba(14, 20, 26, .78);
+    color: #E9EEF3;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    border-top-right-radius: 4px;
+  }
+
+  .plate figcaption b { color: #E8A33D; font-weight: 500; }
+
+  .frame-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr);
+  }
+
+  .beat { padding: 1.35rem 1.45rem; display: flex; flex-direction: column; gap: .65rem; }
+
+  .beat-label {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .beat p { color: var(--ink-2); text-wrap: pretty; }
+
+  .said {
+    font-size: var(--step-1);
+    line-height: 1.35;
+    letter-spacing: -.012em;
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .said::before, .said::after { content: '"'; color: var(--signal); }
+
+  .trace {
+    padding: 1.35rem 1.45rem;
+    background: var(--surface-2);
+    border-left: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: .55rem;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    line-height: 1.5;
+  }
+
+  .trace-row { display: flex; gap: .7rem; align-items: baseline; }
+
+  .trace-row > span:first-child {
+    color: var(--muted);
+    flex: 0 0 4.6rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .trace-row > span:last-child { color: var(--ink-2); }
+  .trace-row b { color: var(--ink); font-weight: 500; }
+
+  .tag {
+    align-self: flex-start;
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    padding: .2rem .5rem;
+    border-radius: 2px;
+  }
+
+  .tag.live { background: var(--live-soft); color: var(--live); }
+  .tag.wait { background: var(--signal-soft); color: var(--signal-ink); }
+
+  /* ---------- moments + status ---------- */
+
+  .moments {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+    gap: .75rem;
+  }
+
+  .moment {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.15rem 1.2rem 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+  }
+
+  .moment-where {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--signal);
+  }
+
+  .moment p { font-size: var(--step--1); color: var(--ink-2); line-height: 1.5; }
+  .moment .q { color: var(--ink); font-weight: 600; }
+
+  .status {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+    gap: .75rem;
+  }
+
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.2rem 1.3rem 1.35rem;
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+  }
+
+  .card.ok { border-left: 3px solid var(--live); }
+  .card.blocked { border-left: 3px solid var(--alert); }
+  .card.next { border-left: 3px solid var(--signal); }
+
+  .card h3 { font-size: var(--step-0); letter-spacing: -.008em; }
+  .card p { font-size: var(--step--1); color: var(--ink-2); line-height: 1.55; }
+
+  .card-state { font-family: var(--mono); font-size: .68rem; letter-spacing: .12em; text-transform: uppercase; }
+  .card.ok .card-state { color: var(--live); }
+  .card.blocked .card-state { color: var(--alert); }
+  .card.next .card-state { color: var(--signal); }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.4rem;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: .4rem 1.6rem;
+  }
+
+  @media (max-width: 46rem) {
+    .frame-body { grid-template-columns: 1fr; }
+    .trace { border-left: 0; border-top: 1px solid var(--line); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Glassbridge / storyboard</p>
+    <h1>Look at it. Ask about it. Hear the answer.</h1>
+    <p class="standfirst">
+      Smart glasses stream what you are looking at to Claude, and Claude answers in your ear a few
+      seconds later. <b>No phone comes out of your pocket.</b>
+    </p>
+    <div class="specs">
+      <span>Capture <b>Ray-Ban Meta glasses</b></span>
+      <span>Relay <b>iPhone over Wi-Fi</b></span>
+      <span>Brains <b>FastAPI on a MacBook</b></span>
+      <span>Round trip <b>4 to 13 seconds</b></span>
+    </div>
+  </header>
+
+  <section>
+    <div class="section-head">
+      <h2>One loop, five stages</h2>
+      <p class="prose">
+        Every interaction runs the same path. The glasses and phone only capture and play back.
+        Everything expensive happens on the Mac, which is why the laptop has to be on the same network.
+      </p>
+    </div>
+
+    <div class="pipe-scroll">
+      <div class="pipe">
+        <div class="stage" data-where="phone">
+          <span class="stage-n">01</span><span class="stage-name">Capture</span>
+          <span class="stage-note">One JPEG frame plus 5s of audio, grabbed in parallel</span>
+        </div>
+        <div class="stage" data-where="mac">
+          <span class="stage-n">02</span><span class="stage-name">Transcribe</span>
+          <span class="stage-note">faster-whisper, distil-large-v3, on CPU</span>
+        </div>
+        <div class="stage" data-where="mac">
+          <span class="stage-n">03</span><span class="stage-name">Think</span>
+          <span class="stage-note">Claude reads the frame and the question, may search the web</span>
+        </div>
+        <div class="stage" data-where="mac">
+          <span class="stage-n">04</span><span class="stage-name">Speak</span>
+          <span class="stage-note">ElevenLabs streams MP3 back as it is generated</span>
+        </div>
+        <div class="stage" data-where="phone">
+          <span class="stage-n">05</span><span class="stage-name">Play</span>
+          <span class="stage-note">Audio routes to the glasses over Bluetooth</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="pipe-key">
+      <i>Runs on the glasses and phone</i>
+      <i class="mac">Runs on the MacBook</i>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">Scenario</p>
+      <h2>The hardware store</h2>
+      <p class="prose">
+        You are standing in aisle seven holding a bolt that came out of a chair leg. You need the same
+        one, and there are four bins of things that look identical. This is the sequence.
+      </p>
+    </div>
+
+    <div class="frames">
+
+      <article class="frame">
+        <figure class="plate">
+          <img src="{{IMG_01}}" alt="A person wearing smart glasses holds a small bolt up to the light in a dim hardware store aisle lined with parts bins.">
+          <figcaption><b>01</b><span>Aisle seven</span></figcaption>
+        </figure>
+        <div class="frame-body">
+          <div class="beat">
+            <span class="beat-label">What happens</span>
+            <p class="said">Is this the same thread pitch as the bolts in this bin?</p>
+            <p>You ask without taking the bolt out of the light. The glasses are already aimed at the
+              thing you are asking about, so there is no shot to frame.</p>
+          </div>
+          <div class="trace">
+            <span class="tag live">Capturing</span>
+            <div class="trace-row"><span>+0.0s</span><span>capture starts</span></div>
+            <div class="trace-row"><span>+0.0s</span><span><b>photo</b> and <b>mic</b> run together</span></div>
+            <div class="trace-row"><span>+5.0s</span><span>WAV closed, JPEG in hand</span></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="frame">
+        <figure class="plate">
+          <img src="{{IMG_02}}" alt="First person view through the glasses: a hex bolt held in sharp focus, rows of parts bins blurred behind it.">
+          <figcaption><b>02</b><span>What the camera sees</span></figcaption>
+        </figure>
+        <div class="frame-body">
+          <div class="beat">
+            <span class="beat-label">Under the hood</span>
+            <p>The frame is whatever was in front of you. No framing, no focus tap, no shutter to line
+              up. That is the entire reason the camera belongs on your face.</p>
+            <p>A session ID rides along with it, so Claude still remembers the last three things you
+              asked in this aisle.</p>
+          </div>
+          <div class="trace">
+            <span class="tag wait">Uploading</span>
+            <div class="trace-row"><span>POST</span><span><b>/ask</b> multipart</span></div>
+            <div class="trace-row"><span>field</span><span>image, JPEG</span></div>
+            <div class="trace-row"><span>field</span><span>audio, 16kHz mono WAV</span></div>
+            <div class="trace-row"><span>field</span><span>session_id, one per launch</span></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="frame">
+        <figure class="plate">
+          <img src="{{IMG_03}}" alt="Close profile of a fingertip pressing the temple arm of smart glasses, a small amber light at the hinge.">
+          <figcaption><b>03</b><span>The trigger</span></figcaption>
+        </figure>
+        <div class="frame-body">
+          <div class="beat">
+            <span class="beat-label">Today, and next</span>
+            <p>Right now this is a button press, which means one hand leaves the task. The wake word
+              is already built and on device, so the same moment becomes a spoken phrase.</p>
+            <p>An amber tick at the hinge is the only confirmation you need. You never look at a screen.</p>
+          </div>
+          <div class="trace">
+            <span class="tag wait">Arming</span>
+            <div class="trace-row"><span>now</span><span>button on temple</span></div>
+            <div class="trace-row"><span>next</span><span><b>"hey glass"</b>, on device</span></div>
+            <div class="trace-row"><span>cue</span><span>rising tone, then listen</span></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="frame">
+        <figure class="plate">
+          <img src="{{IMG_04}}" alt="A thin amber thread of light runs from a pair of glasses to a phone in a jacket pocket and across to a laptop glowing on a desk.">
+          <figcaption><b>04</b><span>The relay</span></figcaption>
+        </figure>
+        <div class="frame-body">
+          <div class="beat">
+            <span class="beat-label">Under the hood</span>
+            <p>Glasses to phone over Bluetooth, phone to laptop over your Wi-Fi. Whisper transcribes
+              locally, then Claude reads the photo and the question in the same message.</p>
+            <p>Claude can search the web mid-answer when a spec or a price would settle the question.</p>
+          </div>
+          <div class="trace">
+            <span class="tag wait">Thinking</span>
+            <div class="trace-row"><span>stt</span><span><b>distil-large-v3</b>, int8, CPU</span></div>
+            <div class="trace-row"><span>in</span><span>1 image, 1 question, 3 prior turns</span></div>
+            <div class="trace-row"><span>tools</span><span><b>web_search</b>, datetime, notes</span></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="frame">
+        <figure class="plate">
+          <img src="{{IMG_05}}" alt="Close portrait of a person wearing smart glasses, head tilted, listening to a reply, with a soft amber glow at the temple.">
+          <figcaption><b>05</b><span>The answer</span></figcaption>
+        </figure>
+        <div class="frame-body">
+          <div class="beat">
+            <span class="beat-label">What you hear</span>
+            <p class="said">That is an M6 by 1.0. The bin on your left is M6 by 1.25, so the threads
+              will bind. You want the bin one row down.</p>
+            <p>Audio starts before the sentence has finished generating, so the reply begins in your
+              ear while the rest is still being spoken into existence.</p>
+          </div>
+          <div class="trace">
+            <span class="tag live">Speaking</span>
+            <div class="trace-row"><span>voice</span><span>ElevenLabs Flash v2.5</span></div>
+            <div class="trace-row"><span>route</span><span>streaming MP3, first chunk early</span></div>
+            <div class="trace-row"><span>out</span><span>glasses speaker over Bluetooth</span></div>
+          </div>
+        </div>
+      </article>
+
+      <article class="frame">
+        <figure class="plate">
+          <img src="{{IMG_06}}" alt="A person reaches into one parts bin lit warm amber while every surrounding bin sits in cool shadow.">
+          <figcaption><b>06</b><span>Outcome</span></figcaption>
+        </figure>
+        <div class="frame-body">
+          <div class="beat">
+            <span class="beat-label">Outcome</span>
+            <p>You pick from the right bin and leave. Under ten seconds, and your hands never stopped
+              holding the bolt.</p>
+            <p>The phone alternative is unlocking, opening a camera, framing a macro shot of a thread,
+              typing a question, and reading a wall of text. Most people skip that and guess.</p>
+          </div>
+          <div class="trace">
+            <span class="tag live">Done</span>
+            <div class="trace-row"><span>total</span><span><b>4 to 13s</b> end to end</span></div>
+            <div class="trace-row"><span>kept</span><span>turn saved to session memory</span></div>
+            <div class="trace-row"><span>cost</span><span>one Claude call, one voice render</span></div>
+          </div>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">The same loop elsewhere</p>
+      <h2>Nothing changes but the question</h2>
+      <p class="prose">
+        Every scenario below runs the identical pipeline. What varies is the sentence you say and the
+        thing you happen to be looking at, which is the whole argument for putting the camera on your face.
+      </p>
+    </div>
+
+    <div class="moments">
+      <div class="moment">
+        <span class="moment-where">At the table, abroad</span>
+        <p class="q">Translate this.</p>
+        <p>The menu is in front of you and the waiter is waiting. You get natural phrasing read aloud,
+          not a literal word swap held under a phone.</p>
+      </div>
+      <div class="moment">
+        <span class="moment-where">Hands covered in flour</span>
+        <p class="q">What do I do next?</p>
+        <p>Claude sees the pan, reads the state of the onions, and picks up from the recipe you asked
+          about two turns ago.</p>
+      </div>
+      <div class="moment">
+        <span class="moment-where">Someone's kitchen windowsill</span>
+        <p class="q">Am I underwatering this?</p>
+        <p>Vision identifies the species, a web search fills in the care details, and the answer comes
+          back the moment you noticed the drooping leaves.</p>
+      </div>
+      <div class="moment">
+        <span class="moment-where">Small print on a box</span>
+        <p class="q">Read this to me.</p>
+        <p>Text gets reflowed into something speakable and the fine print is skipped unless you ask
+          for it. Both hands stay free.</p>
+      </div>
+      <div class="moment">
+        <span class="moment-where">Paying at the counter</span>
+        <p class="q">Log this.</p>
+        <p>Vendor, total, and category get read back for correction on the spot, instead of a shoebox
+          of receipts three weeks later.</p>
+      </div>
+      <div class="moment">
+        <span class="moment-where">Walking past a shelf</span>
+        <p class="q">Save that.</p>
+        <p>A one-line note about the thing you just looked at, written to a scratchpad you can search
+          later. Effortless capture is the entire point.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <p class="eyebrow">Honest status</p>
+      <h2>What actually runs today</h2>
+    </div>
+
+    <div class="status">
+      <div class="card ok">
+        <span class="card-state">Working</span>
+        <h3>The whole loop, on the iPhone</h3>
+        <p>Point the phone at something, tap, and hear Claude answer. Capture, transcription, vision,
+          and voice all work end to end at the times quoted above.</p>
+      </div>
+      <div class="card blocked">
+        <span class="card-state">Blocked</span>
+        <h3>The glasses as the camera</h3>
+        <p>Written and verified against a mock device, but two Meta-side bugs block real hardware.
+          Their developer signup rejects the account, and developer mode registers the app without
+          ever showing a camera permission toggle.</p>
+      </div>
+      <div class="card ok">
+        <span class="card-state">Working</span>
+        <h3>The glasses as mic and speaker</h3>
+        <p>Audio never touches the blocked SDK. Turn on Use for Calls in Bluetooth settings and the
+          glasses carry your voice and Claude's reply today.</p>
+      </div>
+      <div class="card next">
+        <span class="card-state">Next</span>
+        <h3>Hands off the phone entirely</h3>
+        <p>Wake word and rolling visual context are built but not wired in. Spoken start and stop,
+          silence detection, and audio cues are what turn this from an app into an assistant.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Glassbridge</span>
+    <span>Scenario drawn from docs/USE_CASES.md, Tier 1</span>
+    <span>Panels generated with gpt-image-1</span>
+  </footer>
+
+</div>
