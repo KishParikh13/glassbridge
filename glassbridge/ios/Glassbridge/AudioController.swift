@@ -1,240 +1,172 @@
+import Accelerate
 import AVFoundation
 import Foundation
 
-/// AVAudioSession + record + play, wired for Meta Ray-Ban HFP Bluetooth.
+/// Recording and playback for the ask loop.
 ///
-/// Key gotcha: `.playAndRecord` + `[.allowBluetoothHFP]` lets HFP appear in
-/// `availableInputs`, but iOS only **activates** that route after you call
-/// `setPreferredInput(...)` and wait. The HFP route appears with portType
-/// `.bluetoothHFP`. If you skip the wait, the next recording grabs the
-/// iPhone built-in mic instead.
+/// This deliberately owns neither the audio session nor the microphone any more.
+/// `AudioSessionController` owns the session for the app's lifetime, and `MicrophoneHub`
+/// owns the single input tap that both this and `WakeWordListener` feed from. That split
+/// is what lets the wake word keep listening while a reply is playing.
+@MainActor
 final class AudioController {
     enum AudioError: LocalizedError {
-        case sessionSetupFailed(String)
-        case noBluetoothHFPRoute
-        case routeActivationTimeout
-        case recorderFailed(String)
         case playerFailed(String)
 
         var errorDescription: String? {
             switch self {
-            case .sessionSetupFailed(let msg): return "Audio session: \(msg)"
-            case .noBluetoothHFPRoute:
-                return "Your Ray-Ban glasses aren't selected as the iPhone's audio device. " +
-                       "Open Settings > Bluetooth, tap your glasses, and enable 'Use for Calls'."
-            case .routeActivationTimeout:
-                return "iOS didn't activate the glasses audio route in time."
-            case .recorderFailed(let msg): return "Recorder: \(msg)"
-            case .playerFailed(let msg): return "Player: \(msg)"
+            case .playerFailed(let message): return "Player: \(message)"
             }
         }
     }
 
-    private let session = AVAudioSession.sharedInstance()
-    private var recorder: AVAudioRecorder?
-    private var meterRecorder: AVAudioRecorder?
+    private let recorder = MicRecorder()
     private var player: AVAudioPlayer?
     private var playbackContinuation: CheckedContinuation<Void, Never>?
     private let playbackDelegate = PlaybackDelegate()
 
+    private var meterSinkID: UUID?
+    private let meter = MeterBox()
+
     init() {
         playbackDelegate.onFinish = { [weak self] in
-            self?.completePlayback()
+            Task { @MainActor in self?.completePlayback() }
         }
     }
 
-    /// Configure + activate the session and pin the input to the glasses HFP route.
-    /// Returns once the route is active (HFP input + output) or throws.
+    // MARK: - Session
+
+    /// Bring the shared session up and give the glasses route a moment to activate.
+    /// Falls through to the iPhone mic and speaker when no Bluetooth route appears,
+    /// which is the normal case when the glasses are folded or out of range.
     func activateForGlasses(timeout: TimeInterval = 2.0) async throws {
-        do {
-            try session.setCategory(
-                .playAndRecord,
-                mode: .voiceChat,
-                options: [.allowBluetoothHFP, .duckOthers, .defaultToSpeaker]
-            )
-            try session.setActive(true, options: [])
-        } catch {
-            throw AudioError.sessionSetupFailed(error.localizedDescription)
-        }
-
-        // Glasses can show up as HFP (classic Bluetooth), BLE Audio (newer firmware
-        // with LC3), or — fallback — as a wired-headset-like accessory. Accept any.
-        let btPortTypes: Set<AVAudioSession.Port> = [
-            .bluetoothHFP, .bluetoothLE, .bluetoothA2DP, .headsetMic, .headphones,
-        ]
-        let available = session.availableInputs ?? []
-        let glassesNames = ["RB Meta", "Ray-Ban", "Ray Ban", "Meta"]
-        let chosen = available.first(where: { p in
-            btPortTypes.contains(p.portType)
-                && glassesNames.contains(where: { p.portName.localizedCaseInsensitiveContains($0) })
-        }) ?? available.first(where: { btPortTypes.contains($0.portType) })
-
-        if let chosen {
-            try? session.setPreferredInput(chosen)
-            // Best-effort: poll briefly for BT route activation, but don't fail if it
-            // doesn't activate — iPhone mic/speaker fallback is fine for the MVP.
-            let deadline = Date().addingTimeInterval(timeout)
-            while Date() < deadline {
-                let route = session.currentRoute
-                let inputBT = route.inputs.contains(where: { btPortTypes.contains($0.portType) })
-                let outputBT = route.outputs.contains(where: { btPortTypes.contains($0.portType) })
-                if inputBT && outputBT { return }
-                try await Task.sleep(nanoseconds: 100_000_000)
-            }
-        }
-        // No BT input or BT didn't activate in time — proceed with default route
-        // (iPhone built-in mic + speaker). The session is already active.
-        return
+        try AudioSessionController.shared.activate()
+        await AudioSessionController.shared.waitForBluetoothRoute(timeout: timeout)
     }
 
-    func deactivate() {
-        try? session.setActive(false, options: [.notifyOthersOnDeactivation])
+    // MARK: - Recording
+
+    /// Record a question, ending on silence rather than a fixed timer.
+    func recordQuestion() async throws -> URL {
+        try await recorder.record(.ask)
     }
 
-    /// Records `seconds` of audio from the glasses mic to a temp WAV file.
-    /// Returns the file URL.
+    /// Record for an exact duration. Used by the loopback diagnostic, which wants a
+    /// predictable length rather than a natural one.
     func record(seconds: TimeInterval) async throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glassbridge-\(UUID().uuidString).wav")
-
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            // HFP from the glasses is 8 kHz mono. Recording at 16 kHz here lets
-            // iOS upsample cleanly; Whisper resamples again internally, no harm.
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsFloatKey: false,
-        ]
-
-        let r: AVAudioRecorder
-        do {
-            r = try AVAudioRecorder(url: url, settings: settings)
-        } catch {
-            throw AudioError.recorderFailed(error.localizedDescription)
-        }
-        r.isMeteringEnabled = false
-        guard r.prepareToRecord() else {
-            throw AudioError.recorderFailed("prepareToRecord returned false")
-        }
-        guard r.record(forDuration: seconds) else {
-            throw AudioError.recorderFailed("record() returned false")
-        }
-        self.recorder = r
-
-        // Wait the duration + a small tail.
-        try await Task.sleep(nanoseconds: UInt64((seconds + 0.15) * 1_000_000_000))
-        r.stop()
-        self.recorder = nil
-        return url
+        try await recorder.record(.fixed(seconds: seconds))
     }
 
-    /// Plays an MP3 buffer through the active route (glasses if HFP active).
-    /// Returns when playback finishes.
+    // MARK: - Playback
+
+    /// Plays an MP3 buffer through the active route. Returns when playback finishes.
     func play(mp3 data: Data) async throws {
-        let p: AVAudioPlayer
+        let player: AVAudioPlayer
         do {
-            p = try AVAudioPlayer(data: data, fileTypeHint: AVFileType.mp3.rawValue)
+            player = try AVAudioPlayer(data: data, fileTypeHint: AVFileType.mp3.rawValue)
         } catch {
             throw AudioError.playerFailed(error.localizedDescription)
         }
-        p.delegate = playbackDelegate
-        guard p.prepareToPlay() else {
+        try await play(player)
+    }
+
+    /// Play any audio file, for example a recorded WAV during loopback.
+    func play(fileURL url: URL) async throws {
+        let player: AVAudioPlayer
+        do {
+            player = try AVAudioPlayer(contentsOf: url)
+        } catch {
+            throw AudioError.playerFailed(error.localizedDescription)
+        }
+        try await play(player)
+    }
+
+    /// Synthesize and play a sine tone. A quick check that the glasses speaker works.
+    func playTestTone(frequency: Double = 880, seconds: Double = 1.0) async throws {
+        let data = Self.sineWAV(frequency: frequency, seconds: seconds)
+        let player: AVAudioPlayer
+        do {
+            player = try AVAudioPlayer(data: data, fileTypeHint: AVFileType.wav.rawValue)
+        } catch {
+            throw AudioError.playerFailed(error.localizedDescription)
+        }
+        try await play(player)
+    }
+
+    /// Stop whatever is playing right now. The spoken-interrupt path will call this.
+    func stopPlayback() {
+        player?.stop()
+        completePlayback()
+    }
+
+    private func play(_ player: AVAudioPlayer) async throws {
+        // A second play() while one is pending used to overwrite the stored continuation,
+        // stranding the first caller forever. Release it before taking over.
+        completePlayback()
+
+        player.delegate = playbackDelegate
+        guard player.prepareToPlay() else {
             throw AudioError.playerFailed("prepareToPlay returned false")
         }
-        self.player = p
+        self.player = player
 
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            self.playbackContinuation = cont
-            if !p.play() {
-                self.completePlayback()
+        // Cancelling the calling task cuts the reply off. Without this, "never mind"
+        // during playback still made you sit through the rest of the sentence.
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                self.playbackContinuation = continuation
+                if !player.play() {
+                    self.completePlayback()
+                }
             }
+        } onCancel: {
+            Task { @MainActor in self.stopPlayback() }
         }
     }
 
     private func completePlayback() {
-        let cont = self.playbackContinuation
-        self.playbackContinuation = nil
-        self.player = nil
-        cont?.resume()
+        let continuation = playbackContinuation
+        playbackContinuation = nil
+        player = nil
+        continuation?.resume()
     }
 
-    /// Snapshot of the current route for the status label.
-    func routeSummary() -> String {
-        let route = session.currentRoute
-        let i = route.inputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
-        let o = route.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ",")
-        return "in=[\(i)] out=[\(o)]"
-    }
+    // MARK: - Diagnostics
 
-    /// Newline-separated list of inputs iOS currently offers (for the Debug tab).
-    func availableInputsSummary() -> String {
-        let inputs = session.availableInputs ?? []
-        guard !inputs.isEmpty else { return "none" }
-        return inputs.map { "\($0.portType.rawValue): \($0.portName)" }.joined(separator: "\n")
-    }
+    func routeSummary() -> String { AudioSessionController.shared.routeSummary() }
+    func availableInputsSummary() -> String { AudioSessionController.shared.availableInputsSummary() }
 
-    /// Play any audio file (e.g. a recorded WAV) through the active route.
-    func play(fileURL url: URL) async throws {
-        let p: AVAudioPlayer
-        do { p = try AVAudioPlayer(contentsOf: url) }
-        catch { throw AudioError.playerFailed(error.localizedDescription) }
-        try await play(p)
-    }
-
-    /// Synthesize and play a sine tone — a quick "is the glasses speaker working" test.
-    func playTestTone(frequency: Double = 880, seconds: Double = 1.0) async throws {
-        let data = Self.sineWAV(frequency: frequency, seconds: seconds)
-        let p: AVAudioPlayer
-        do { p = try AVAudioPlayer(data: data, fileTypeHint: AVFileType.wav.rawValue) }
-        catch { throw AudioError.playerFailed(error.localizedDescription) }
-        try await play(p)
-    }
-
-    private func play(_ p: AVAudioPlayer) async throws {
-        p.delegate = playbackDelegate
-        guard p.prepareToPlay() else { throw AudioError.playerFailed("prepareToPlay returned false") }
-        self.player = p
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            self.playbackContinuation = cont
-            if !p.play() { self.completePlayback() }
-        }
-    }
-
-    // MARK: – Live mic level metering (Debug tab)
-
+    /// Live input metering, fed by the same tap everything else uses rather than a second
+    /// recorder competing for the mic.
     func startMicMonitor() throws {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("gb-meter.wav")
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 16_000,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsFloatKey: false,
-        ]
-        let r = try AVAudioRecorder(url: url, settings: settings)
-        r.isMeteringEnabled = true
-        guard r.prepareToRecord(), r.record() else {
-            throw AudioError.recorderFailed("mic monitor failed to start")
+        guard meterSinkID == nil else { return }
+        // Capture the box rather than self: the sink runs on the audio thread and must not
+        // touch main-actor state.
+        let meter = self.meter
+        meterSinkID = try MicrophoneHub.shared.addSink { buffer, _ in
+            guard let channel = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+            var value: Float = 0
+            vDSP_rmsqv(channel, 1, &value, vDSP_Length(buffer.frameLength))
+            meter.store(value)
         }
-        meterRecorder = r
     }
 
-    /// Normalized 0…1 average input level. Poll while monitoring.
+    /// Normalized 0...1 input level. Poll while monitoring.
     func micLevel() -> Float {
-        guard let r = meterRecorder else { return 0 }
-        r.updateMeters()
-        let db = r.averagePower(forChannel: 0)   // ~ -160 (silence) … 0 (loud)
+        let value = meter.load()
+        guard value > 0 else { return 0 }
+        let db = 20 * log10(value)
         let floor: Float = -50
         let clamped = max(floor, min(0, db))
         return (clamped - floor) / (0 - floor)
     }
 
     func stopMicMonitor() {
-        meterRecorder?.stop()
-        meterRecorder = nil
+        if let meterSinkID {
+            MicrophoneHub.shared.removeSink(meterSinkID)
+            self.meterSinkID = nil
+        }
+        meter.store(0)
     }
 
     private static func sineWAV(frequency: Double, seconds: Double, sampleRate: Double = 16_000) -> Data {
@@ -262,10 +194,31 @@ final class AudioController {
 
 private final class PlaybackDelegate: NSObject, AVAudioPlayerDelegate {
     var onFinish: (() -> Void)?
+
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully _: Bool) {
         onFinish?()
     }
+
     func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
         onFinish?()
+    }
+}
+
+/// A one-value mailbox so the realtime audio thread can hand levels to the main actor
+/// without either side reaching into the other's isolation.
+private final class MeterBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Float = 0
+
+    func store(_ newValue: Float) {
+        lock.lock()
+        value = newValue
+        lock.unlock()
+    }
+
+    func load() -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

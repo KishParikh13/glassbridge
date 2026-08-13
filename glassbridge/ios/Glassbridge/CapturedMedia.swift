@@ -11,6 +11,7 @@ struct CapturedMedia: Identifiable {
     enum Source: String {
         case glasses = "Glasses"
         case iPhone = "iPhone"
+        case upload = "Upload"
     }
 
     let id = UUID()

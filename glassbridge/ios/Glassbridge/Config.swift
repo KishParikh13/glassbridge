@@ -10,12 +10,9 @@ enum AppConfig {
         #if targetEnvironment(simulator)
         return URL(string: "http://127.0.0.1:8082")!
         #else
-        return URL(string: "http://192.168.1.100:8082")! // ← REPLACE with your Mac's LAN IP
+        return URL(string: "http://192.168.3.156:8082")! // Mac's current LAN IP (en0)
         #endif
     }()
-
-    /// Seconds of audio recorded per ASK.
-    static let recordSeconds: Double = 5.0
 
     /// Stable per-launch session id so the backend can keep multi-turn memory.
     static let sessionId: String = UUID().uuidString

@@ -25,6 +25,8 @@ glassbridge/ios/*.xcworkspace/
 *.xcuserstate
 xcuserdata/
 build/
+build-sim/
+build-dev/
 DerivedData/
 
 # ---- reference repos (cloned upstream sources, not ours) ----

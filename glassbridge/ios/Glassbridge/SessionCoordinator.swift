@@ -5,10 +5,33 @@ import AVFoundation
 
 @MainActor
 final class SessionCoordinator: ObservableObject {
+    enum ClaudeModel: String, CaseIterable, Identifiable {
+        case opus47 = "claude-opus-4-7"
+        case sonnet46 = "claude-sonnet-4-6"
+        case haiku45 = "claude-haiku-4-5-20251001"
+
+        /// The model used when the user hasn't picked one — matches the backend's
+        /// configured default (`anthropic_model` in config.py).
+        static let `default`: ClaudeModel = .sonnet46
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .opus47: return "Opus 4.7"
+            case .sonnet46: return "Sonnet 4.6"
+            case .haiku45: return "Haiku 4.5"
+            }
+        }
+
+        /// Label shown in the picker menu, marking which model is the default.
+        var menuLabel: String { self == .default ? "\(label) (Default)" : label }
+    }
+
     enum Tab: Hashable {
-        case assistant
-        case camera
-        case debug
+        case live
+        case setup
+        case more
     }
 
     enum Phase: Equatable {
@@ -27,10 +50,28 @@ final class SessionCoordinator: ObservableObject {
             case .error(let msg): return "Error: \(msg)"
             }
         }
+
+        /// Bare state name for the log. The user-facing `label` has ellipses and copy in
+        /// it, which reads badly on a timeline.
+        var recordLabel: String {
+            switch self {
+            case .idle: return "idle"
+            case .listening: return "listening"
+            case .thinking: return "thinking"
+            case .speaking: return "speaking"
+            case .error: return "error"
+            }
+        }
     }
 
     @Published var phase: Phase = .idle {
-        didSet { syncLiveActivity() }
+        didSet {
+            syncLiveActivity()
+            // What the listener is armed for follows the phase exactly: "stop" only means
+            // something while a reply is playing, the trigger phrase only while idle.
+            syncListenerScope()
+            recorder.log(.phase, phase.recordLabel)
+        }
     }
     @Published var transcript: String = ""
     @Published var reply: String = ""
@@ -43,40 +84,124 @@ final class SessionCoordinator: ObservableObject {
     private let iPhoneCapture = IPhoneCapture()
     private let iPhoneVideo = IPhoneVideoRecorder()
     private let liveActivity = LiveActivityController()
+    private let earcons = Earcons()
+    let recorder = SessionRecorder()
     private var isBusy = false
 
+    /// The turn in flight, held so a spoken "never mind" can cancel it.
+    private var turnTask: Task<Void, Never>?
+
     @Published var wakeWordEnabled = false
-
     @Published var captureSource: String = "auto"
+    @Published var selectedTab: Tab = .live
+    @Published var selectedModel: ClaudeModel = .default
 
-    // MARK: – Camera tab (direct glasses control, separate from the ASK flow)
+    /// When on, the glasses keep streaming and the live feed is shown in the stage.
+    /// Off by default — otherwise the camera only wakes for a capture/ask.
+    @Published var showLiveCamera = false
 
-    @Published var selectedTab: Tab = .assistant
+    func setShowLiveCamera(_ on: Bool) {
+        showLiveCamera = on
+        glasses.previewEnabled = on
+        if on {
+            Task { await glasses.startStreaming() }
+        } else if !isRecordingVideo {
+            glasses.stopStreaming()
+        }
+    }
+
+    /// Turn the glasses camera back off after a one-off action, unless the user
+    /// asked to keep the live feed on (or a recording is still in progress).
+    private func stopGlassesIfTransient() {
+        if !showLiveCamera && !isRecordingVideo { glasses.stopStreaming() }
+    }
+
+    // MARK: – Onboarding + permissions + backend (Setup tab)
+
+    private let onboardingKey = "gb.hasCompletedOnboarding"
+    @Published var hasCompletedOnboarding: Bool
+    @Published var micPermission: PermStatus = .undetermined
+    @Published var cameraPermission: PermStatus = .undetermined
+    @Published var speechPermission: PermStatus = .undetermined
+    @Published var backendHealth: BackendHealth.Result?
+    @Published var isCheckingBackend = false
+
+    // MARK: – Camera gallery (direct capture, shown on Live)
+
     @Published var capturedMedia: [CapturedMedia] = []
     @Published var isCapturingPhoto = false
     @Published var isRecordingVideo = false
     @Published var captureError: String?
     private var recordingSource: CapturedMedia.Source = .iPhone
 
-    /// True when glasses are live; otherwise the Camera tab falls back to the iPhone.
-    var cameraUsesGlasses: Bool { glasses.status == .streaming }
+    /// True when glasses can be used for an on-demand camera action.
+    var cameraUsesGlasses: Bool { glasses.canCaptureFromGlasses }
 
     init() {
+        hasCompletedOnboarding = UserDefaults.standard.bool(forKey: "gb.hasCompletedOnboarding")
         glasses.start()
+        refreshPermissionStatuses()
+        gblog("[LAUNCH] backend=\(AppConfig.backendURL.absoluteString) mic=\(micPermission) camera=\(cameraPermission) speech=\(speechPermission)")
+        if !hasCompletedOnboarding { selectedTab = .setup }
+        // "Go to sleep" is meant to stick. The listener comes back exactly as you left it
+        // rather than resetting to off, or to on, on every launch.
+        if UserDefaults.standard.bool(forKey: wakeWordKey) {
+            setWakeWord(true, announce: false)
+        }
         #if DEBUG
         maybeRunAutomatedTestAtLaunch()
         #endif
     }
 
+    // MARK: – Onboarding / permissions / backend
+
+    func completeOnboarding() {
+        hasCompletedOnboarding = true
+        UserDefaults.standard.set(true, forKey: onboardingKey)
+        selectedTab = .live
+    }
+
+    func restartOnboarding() {
+        hasCompletedOnboarding = false
+        UserDefaults.standard.set(false, forKey: onboardingKey)
+        selectedTab = .setup
+    }
+
+    func refreshPermissionStatuses() {
+        micPermission = PermissionsService.microphoneStatus()
+        cameraPermission = PermissionsService.cameraStatus()
+        speechPermission = PermissionsService.speechStatus()
+    }
+
+    func requestMic() async { micPermission = await PermissionsService.requestMicrophone() }
+    func requestCamera() async { cameraPermission = await PermissionsService.requestCamera() }
+    func requestSpeech() async { speechPermission = await PermissionsService.requestSpeech() }
+
+    func checkBackend() async {
+        isCheckingBackend = true
+        defer { isCheckingBackend = false }
+        backendHealth = await BackendHealth.check()
+    }
+
+    /// The single source of truth for "what works and what it's connected to."
+    func capabilities() -> [Capability] {
+        Capability.all(
+            connection: glasses.connectionState,
+            micGranted: micPermission.isGranted,
+            cameraGranted: cameraPermission.isGranted,
+            speechGranted: speechPermission.isGranted,
+            backendReachable: backendHealth?.reachable ?? false
+        )
+    }
+
     #if DEBUG
-    /// When launched with GB_AUTO_TEST=1 in the env, fire a self-contained test ASK
-    /// using a stub silent WAV + the captured photo, with text_override bypassing
-    /// Whisper. Result lands in the backend log so we can verify the pipeline end-to-end.
+    /// When launched with GB_AUTO_TEST=1 (or --gb-auto-test), fire a self-contained
+    /// test ASK using a stub image + silent wav + text_override (bypasses Whisper).
     private func maybeRunAutomatedTestAtLaunch() {
         let envHit = ProcessInfo.processInfo.environment["GB_AUTO_TEST"] == "1"
         let argHit = ProcessInfo.processInfo.arguments.contains("--gb-auto-test")
         guard envHit || argHit else { return }
-        print("[TEST] auto-test trigger detected (env=\(envHit) arg=\(argHit))")
+        gblog("[TEST] auto-test trigger detected (env=\(envHit) arg=\(argHit))")
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await self?.runTestAsk()
@@ -86,117 +211,215 @@ final class SessionCoordinator: ObservableObject {
     func runTestAsk() async {
         guard !isBusy else { return }
         isBusy = true
-        defer { isBusy = false }
+        // Recorded like a real turn. There is no camera or mic in the simulator, so this
+        // is the only way to check the recorder end to end, including the JSON write,
+        // without standing in a room wearing the glasses.
+        recorder.begin(route: audio.routeSummary())
+        var outcome = "completed"
+        var stt: Double?
+        var llm: Double?
+        defer {
+            isBusy = false
+            recorder.finish(
+                outcome: outcome,
+                transcript: transcript.isEmpty ? nil : transcript,
+                reply: reply.isEmpty ? nil : reply,
+                stt: stt,
+                llm: llm
+            )
+        }
         do {
             phase = .listening
             captureSource = "automated test (stub image + silent wav + text_override)"
-            // Bypass glasses/iPhone capture entirely — use the stub image MockSetup
-            // produced. Works regardless of whether Wearables.shared is usable.
             guard let image = MockSetup.stubImageData(), !image.isEmpty else {
+                outcome = "error: no stub image"
                 phase = .error("test: no stub image"); return
             }
+            cue(.captured)
+            recorder.log(.capture, "stub photo", detail: "\(image.count) bytes")
             phase = .thinking
             let silent = MockSetup.silentWAV()
             let result = try await backend.ask(
                 audioData: silent,
                 imageJPEG: image,
                 sessionId: AppConfig.sessionId,
-                textOverride: "Describe this image in one short spoken sentence."
+                textOverride: "Describe this image in one short spoken sentence.",
+                model: selectedModel.rawValue.isEmpty ? nil : selectedModel.rawValue
             )
+            stt = result.sttLatency
+            llm = result.llmLatency
+            recorder.log(.backend, "reply", detail: String(
+                format: "stt %.2fs · llm %.2fs · %d mp3 bytes",
+                result.sttLatency ?? 0, result.llmLatency ?? 0, result.mp3.count
+            ))
             transcript = result.transcript ?? ""
             reply = result.reply ?? ""
-            print("[TEST] reply: \(reply)")
-            print("[TEST] mp3 bytes: \(result.mp3.count)")
+            gblog("[TEST] reply: \(reply)")
+            gblog("[TEST] mp3 bytes: \(result.mp3.count)")
             phase = .speaking
             try? await audio.play(mp3: result.mp3)
             phase = .idle
-            print("[TEST] DONE — pipeline OK")
+            gblog("[TEST] DONE — pipeline OK")
         } catch {
-            print("[TEST] FAILED: \(error)")
+            gblog("[TEST] FAILED: \(error)")
+            outcome = "error: \(error.localizedDescription)"
             phase = .error(error.localizedDescription)
         }
     }
     #endif
 
     func askPressed() async {
-        await performAsk(presetImage: nil)
+        await runTurn(presetImage: nil)
     }
 
-    /// Run the full ASK pipeline using a still already in the gallery instead of a
-    /// fresh capture. For videos, a representative frame is extracted. Switches to
-    /// the Assistant tab so the transcript/reply are visible.
+    /// One tap that proves capture → agent → voice actually works together. Four separate
+    /// green status dots do not tell you the chain holds, and this app fails when things
+    /// line up wrong rather than when one part is missing.
+    ///
+    /// `MockSetup` is `#if DEBUG` only (it imports MWDATMockDevice), so release cannot use
+    /// the stub image. It runs a real capture with a fixed prompt instead, which exercises
+    /// more of the chain anyway.
+    func runSelfTest() async {
+        #if DEBUG
+        await runTestAsk()
+        #else
+        await askTypedPrompt("Describe what you can see in one short sentence.")
+        #endif
+    }
+
+    func askTypedPrompt(_ prompt: String, presetImage: Data? = nil) async {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        await runTurn(presetImage: presetImage, textOverride: trimmed)
+    }
+
+    func askTypedPrompt(_ prompt: String, media: CapturedMedia?) async {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || media != nil else { return }
+        let image = media == nil ? nil : await Self.imageJPEG(from: media!)
+        await runTurn(presetImage: image, textOverride: trimmed.isEmpty ? "Describe this." : trimmed)
+    }
+
+    /// Run the ASK pipeline using a still already in the gallery instead of a fresh
+    /// capture. Switches to the Live tab so transcript/reply are visible.
     func askAboutMedia(_ media: CapturedMedia) async {
-        selectedTab = .assistant
+        selectedTab = .live
         guard let image = await Self.imageJPEG(from: media) else {
             phase = .error("Couldn't get an image from that item.")
             return
         }
-        await performAsk(presetImage: image)
+        await runTurn(presetImage: image)
     }
 
-    private func performAsk(presetImage: Data?) async {
+    /// Every entry point comes through here, so there is exactly one turn in flight and
+    /// exactly one handle on it for a spoken "never mind" to cancel.
+    private func runTurn(presetImage: Data?, textOverride: String? = nil) async {
         guard !isBusy else { return }
         isBusy = true
-        // Free the mic from the wake-word listener while we record, and hand it
-        // back when done. Covers both manual ASK and wake-triggered ASK.
-        if wakeWordEnabled { wake.pause() }
-        defer {
-            isBusy = false
-            if wakeWordEnabled { wake.resume() }
-        }
+        suppressCancelCue = false
+        let task = Task { await performAsk(presetImage: presetImage, textOverride: textOverride) }
+        turnTask = task
+        await task.value
+        turnTask = nil
+        isBusy = false
+    }
+
+    private func performAsk(presetImage: Data?, textOverride: String? = nil) async {
+        gblog("[ASK] start wakeWord=\(wakeWordEnabled)")
+        // The listener deliberately keeps running for the whole turn now. Pausing it here
+        // is what used to make a reply impossible to interrupt.
+        defer { earcons.stopThinking() }
+
+        recorder.begin(route: audio.routeSummary())
+        var outcome = "completed"
+        var stt: Double?
+        var llm: Double?
 
         transcript = ""
         reply = ""
         latencySummary = ""
 
         do {
-            phase = .listening
-            try await audio.activateForGlasses()
+            if textOverride == nil {
+                phase = .listening
+                try await audio.activateForGlasses()
+                // The route at `begin` is the pre-activation one, which is not the number
+                // that matters. Activation is what is supposed to pull the glasses off
+                // A2DP (output only) onto a profile that actually carries a microphone.
+                recorder.log(.route, "after activation", detail: audio.routeSummary())
+                recorder.log(.route, "available inputs", detail: audio.availableInputsSummary())
+            }
 
-            // Photo source: glasses when streaming, iPhone otherwise. Audio source
-            // is whatever AVAudioSession ended up with (BT route if available, else
-            // iPhone built-in mic — both produce a WAV the backend can transcribe).
-            let useGlasses = (glasses.status == .streaming)
+            let useGlasses = glasses.canCaptureFromGlasses
             let micLabel = useGlasses ? "glasses-mic" : "iPhone mic"
             let image: Data
-            let wav: URL
+            let wav: URL?
+            let audioData: Data?
             if let presetImage {
                 captureSource = "captured media + \(micLabel)"
                 image = presetImage
-                wav = try await audio.record(seconds: AppConfig.recordSeconds)
+                if textOverride == nil {
+                    wav = try await audio.recordQuestion()
+                    audioData = nil
+                } else {
+                    wav = nil
+                    audioData = Self.silentWAV()
+                }
             } else {
-                captureSource = useGlasses ? "glasses + glasses-mic" : "iPhone camera + iPhone mic"
-                async let audioURL: URL = audio.record(seconds: AppConfig.recordSeconds)
-                async let photoData: Data = useGlasses
-                    ? glasses.capturePhoto()
-                    : iPhoneCapture.capturePhoto()
-                let (img, recorded) = try await (photoData, audioURL)
-                image = img
-                wav = recorded
+                captureSource = useGlasses ? "glasses + \(micLabel)" : "iPhone camera + iPhone mic"
+                if let textOverride {
+                    image = try await (useGlasses ? glasses.capturePhoto() : iPhoneCapture.capturePhoto())
+                    cue(.captured)
+                    transcript = textOverride
+                    wav = nil
+                    audioData = Self.silentWAV()
+                } else {
+                    async let audioURL: URL = audio.recordQuestion()
+                    async let photoData: Data = useGlasses
+                        ? glasses.capturePhoto()
+                        : iPhoneCapture.capturePhoto()
+                    // Click the moment the frame lands, not when the whole turn's IO
+                    // settles. This is the cue that tells you to stop holding the thing up
+                    // to the light, so it is worth nothing if it waits for the recording
+                    // to endpoint first.
+                    image = try await photoData
+                    cue(.captured)
+                    recorder.log(.capture, "photo", detail: "\(image.count) bytes · \(captureSource)")
+                    let recorded = try await audioURL
+                    recorder.log(.recording, "endpointed", detail: Self.wavSummary(recorded))
+                    wav = recorded
+                    audioData = nil
+                }
             }
 
-            // Live rolling context (#1): attach recent glasses frames so Claude has
-            // temporal awareness. Only on fresh captures (not gallery hand-offs).
-            let contextFrames: [Data] = (presetImage == nil && useGlasses && glasses.contextCaptureEnabled)
-                ? glasses.recentContextFrames()
-                : []
+            try Task.checkCancellation()
 
             phase = .thinking
+            earcons.startThinking()
             let result = try await backend.ask(
                 audioURL: wav,
+                audioData: audioData,
                 imageJPEG: image,
-                contextFramesJPEG: contextFrames,
-                sessionId: AppConfig.sessionId
+                contextFramesJPEG: [],
+                sessionId: AppConfig.sessionId,
+                textOverride: textOverride,
+                model: selectedModel.rawValue.isEmpty ? nil : selectedModel.rawValue
             )
+            earcons.stopThinking()
+            try Task.checkCancellation()
+
+            stt = result.sttLatency
+            llm = result.llmLatency
+            recorder.log(.backend, "reply", detail: String(
+                format: "stt %.2fs · llm %.2fs · %d mp3 bytes",
+                result.sttLatency ?? 0, result.llmLatency ?? 0, result.mp3.count
+            ))
+
             transcript = result.transcript ?? ""
             reply = result.reply ?? ""
             var summary = ""
             if let stt = result.sttLatency, let llm = result.llmLatency {
                 summary = String(format: "stt %.2fs · llm %.2fs", stt, llm)
-            }
-            if !contextFrames.isEmpty {
-                summary += summary.isEmpty ? "" : " · "
-                summary += "\(contextFrames.count) ctx frames"
             }
             if let tools = result.tools, !tools.isEmpty {
                 summary += summary.isEmpty ? "" : " · "
@@ -206,19 +429,40 @@ final class SessionCoordinator: ObservableObject {
 
             phase = .speaking
             try await audio.play(mp3: result.mp3)
+            // Cutting playback short resumes the player normally, so the cancel only
+            // surfaces here.
+            try Task.checkCancellation()
 
             phase = .idle
         } catch {
-            phase = .error(error.localizedDescription)
+            if Self.isCancellation(error) {
+                gblog("[ASK] cancelled")
+                outcome = "cancelled"
+                if !suppressCancelCue { cue(.cancelled) }
+                phase = .idle
+            } else {
+                gblog("[ASK] failed: \(error.localizedDescription)")
+                outcome = "error: \(error.localizedDescription)"
+                cue(.error)
+                phase = .error(error.localizedDescription)
+            }
         }
+        suppressCancelCue = false
+        recorder.finish(
+            outcome: outcome,
+            transcript: transcript.isEmpty ? nil : transcript,
+            reply: reply.isEmpty ? nil : reply,
+            stt: stt,
+            llm: llm
+        )
 
-        audio.deactivate()
+        // The session deliberately stays active between asks. Tearing it down here is what
+        // used to cut off the wake word listener and make a follow-up impossible.
+        stopGlassesIfTransient()
     }
 
     // MARK: – Direct camera control
 
-    /// Snap one still — from the glasses when streaming, else the iPhone camera —
-    /// and prepend it to the in-app gallery.
     func takePhotoDirect() async {
         guard !isCapturingPhoto, !isRecordingVideo else { return }
         isCapturingPhoto = true
@@ -238,7 +482,10 @@ final class SessionCoordinator: ObservableObject {
                               source: useGlasses ? .glasses : .iPhone,
                               date: Date()),
                 at: 0)
+            stopGlassesIfTransient()
         } catch {
+            // Direct capture never starts a turn, so this is the only trace it leaves.
+            gblog("[CAPTURE] photo failed (glasses=\(useGlasses)): \(error.localizedDescription)")
             captureError = error.localizedDescription
         }
     }
@@ -251,13 +498,21 @@ final class SessionCoordinator: ObservableObject {
         }
     }
 
+    func beginVideoRecording() async {
+        await startVideoRecording()
+    }
+
+    func endVideoRecording() async {
+        await stopVideoRecording()
+    }
+
     private func startVideoRecording() async {
         guard !isCapturingPhoto, !isRecordingVideo else { return }
         captureError = nil
         let useGlasses = cameraUsesGlasses
         do {
             if useGlasses {
-                try glasses.startVideoRecording()
+                try await glasses.startVideoRecording()
             } else {
                 try await iPhoneVideo.start()
             }
@@ -275,16 +530,19 @@ final class SessionCoordinator: ObservableObject {
             switch recordingSource {
             case .glasses: url = try await glasses.stopVideoRecording()
             case .iPhone:  url = try await iPhoneVideo.stop()
+            case .upload:
+                throw NSError(domain: "SessionCoordinator", code: 31,
+                              userInfo: [NSLocalizedDescriptionKey: "No upload recording is active."])
             }
             capturedMedia.insert(
                 CapturedMedia(kind: .video(url), source: recordingSource, date: Date()),
                 at: 0)
+            stopGlassesIfTransient()
         } catch {
             captureError = error.localizedDescription
         }
     }
 
-    /// Clear the gallery and remove any backing video files from disk.
     func clearCapturedMedia() {
         for url in capturedMedia.compactMap(\.videoURL) {
             try? FileManager.default.removeItem(at: url)
@@ -292,20 +550,151 @@ final class SessionCoordinator: ObservableObject {
         capturedMedia.removeAll()
     }
 
-    // MARK: – Hands-free (#3 wake word + #6 Live Activity)
+    func removeCapturedMedia(_ media: CapturedMedia) {
+        if let url = media.videoURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        capturedMedia.removeAll { $0.id == media.id }
+    }
 
-    func setWakeWord(_ on: Bool) {
+    func attachUploadedPhoto(_ data: Data) {
+        // Library/HEIC photos are often 5–8 MB — over Anthropic's 5 MB inline cap.
+        // Downsize (and transcode HEIC → JPEG) before attaching.
+        let prepared = Self.downsizedJPEG(data) ?? data
+        capturedMedia.insert(CapturedMedia(kind: .photo(prepared), source: .upload, date: Date()), at: 0)
+    }
+
+    private static func downsizedJPEG(_ data: Data, maxDim: CGFloat = 1600, quality: CGFloat = 0.7) -> Data? {
+        guard let image = UIImage(data: data) else { return nil }
+        let longEdge = max(image.size.width, image.size.height)
+        let scale = longEdge > maxDim ? maxDim / longEdge : 1
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1
+        fmt.opaque = true
+        let resized = UIGraphicsImageRenderer(size: size, format: fmt).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return resized.jpegData(compressionQuality: quality)
+    }
+
+    func attachUploadedVideo(_ url: URL) {
+        let target = FileManager.default.temporaryDirectory
+            .appendingPathComponent("upload-\(UUID().uuidString).\(url.pathExtension.isEmpty ? "mov" : url.pathExtension)")
+        do {
+            if FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.removeItem(at: target)
+            }
+            try FileManager.default.copyItem(at: url, to: target)
+            capturedMedia.insert(CapturedMedia(kind: .video(target), source: .upload, date: Date()), at: 0)
+        } catch {
+            captureError = "Couldn't attach video: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: – Hands-free (wake word + voice control + Live Activity)
+
+    private let wakeWordKey = "gb.wakeWordEnabled"
+
+    /// Set once when a turn is cancelled by something that has its own closing sound, so
+    /// "go to sleep" mid-reply does not stack the cancel cue on top of the sleep cue.
+    private var suppressCancelCue = false
+
+    func setWakeWord(_ on: Bool, announce: Bool = true) {
+        gblog("[WAKE] set enabled=\(on) · speechPermission=\(speechPermission) · route=\(audio.routeSummary())")
         wakeWordEnabled = on
+        UserDefaults.standard.set(on, forKey: wakeWordKey)
         if on {
-            wake.onWake = { [weak self] in
-                Task { await self?.askPressed() }
+            wake.onCommand = { [weak self] command in self?.handle(command) }
+            // Logged whether or not it fired. A match the scope declined is the whole
+            // point of having a scope, and it leaves no other trace.
+            wake.onObservation = { [weak self] observation in
+                self?.recorder.log(
+                    .heard,
+                    observation.command.rawValue,
+                    detail: observation.transcript,
+                    armed: observation.armed,
+                    scope: observation.scope.names
+                )
             }
             wake.start()
+            syncListenerScope()
+            if announce { cue(.awake) }
             liveActivity.start(status: "Ready", detail: "Say \u{201C}\(wake.triggerPhrase)\u{201D}")
         } else {
             wake.stop()
             liveActivity.end()
         }
+    }
+
+    /// The spoken control surface. Which of these can fire at any given moment is settled
+    /// by `syncListenerScope`, so nothing here has to second-guess the phase.
+    private func handle(_ command: WakeWordListener.Command) {
+        recorder.log(.command, command.rawValue)
+        switch command {
+        case .wake:
+            cue(.listening)
+            Task { await runTurn(presetImage: nil) }
+        case .cancel:
+            cancelTurn()
+        case .stopSpeaking:
+            // Resumes the player's continuation, so the turn finishes on its own terms
+            // rather than unwinding as a cancel. You asked it to stop talking, not to
+            // forget the question.
+            audio.stopPlayback()
+        case .sleep:
+            cue(.asleep)
+            cancelTurn(silent: true)
+            setWakeWord(false)
+        }
+    }
+
+    /// Play a cue and note it, so the timeline lines up with what you actually heard.
+    private func cue(_ c: Earcons.Cue) {
+        earcons.play(c)
+        recorder.log(.earcon, String(describing: c))
+    }
+
+    /// 16kHz mono 16-bit, so bytes convert straight to seconds. Useful for checking
+    /// whether silence endpointing is cutting people off.
+    private static func wavSummary(_ url: URL) -> String {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let bytes = (attributes?[.size] as? Int) ?? 0
+        let seconds = Double(bytes) / (16_000 * 2)
+        return String(format: "%.2fs · %d bytes", seconds, bytes)
+    }
+
+    /// Drop the turn in flight. A false trigger captures first and this is how you take it
+    /// back, which is the whole reason the capture click has to be audible.
+    func cancelTurn(silent: Bool = false) {
+        guard let turnTask else { return }
+        suppressCancelCue = silent
+        turnTask.cancel()
+    }
+
+    /// The listener is armed for exactly what makes sense right now: the trigger phrase
+    /// only while idle, so a question cannot open a second turn, and "stop" only while a
+    /// reply is playing, so asking whether you should stop taking something does not cut
+    /// itself off.
+    private func syncListenerScope() {
+        guard wakeWordEnabled else { return }
+        switch phase {
+        case .idle, .error:
+            wake.setScope(.idle)
+        case .listening, .thinking:
+            wake.setScope(.capturing)
+        case .speaking:
+            wake.setScope(.speaking)
+        }
+    }
+
+    /// A dropped turn is not a failure, and it arrives wearing a different coat depending
+    /// on which await was in flight when the cancel landed.
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let recorder = error as? MicRecorder.RecorderError, case .cancelled = recorder { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        return false
     }
 
     private func syncLiveActivity() {
@@ -327,7 +716,7 @@ final class SessionCoordinator: ObservableObject {
         liveActivity.update(status: status, detail: detail)
     }
 
-    // MARK: – Debug / diagnostics (audio + general)
+    // MARK: – Debug / diagnostics (audio + general), surfaced under More → Advanced
 
     @Published var audioRoute: String = ""
     @Published var availableInputs: String = ""
@@ -360,13 +749,11 @@ final class SessionCoordinator: ObservableObject {
     }
 
     func deactivateAudioRoute() {
-        audio.deactivate()
+        AudioSessionController.shared.deactivate()
         diag("audio route deactivated")
         refreshAudioRoute()
     }
 
-    /// Record from the mic, then immediately play it back — end-to-end mic+speaker
-    /// test that needs no backend.
     func runMicLoopback(seconds: Double) async {
         guard !isAudioBusy, !isMonitoringMic else { return }
         isAudioBusy = true
@@ -383,7 +770,6 @@ final class SessionCoordinator: ObservableObject {
         } catch {
             diag("loopback failed: \(error.localizedDescription)")
         }
-        audio.deactivate()
     }
 
     func playSpeakerTone() async {
@@ -399,7 +785,6 @@ final class SessionCoordinator: ObservableObject {
         } catch {
             diag("tone failed: \(error.localizedDescription)")
         }
-        audio.deactivate()
     }
 
     func toggleMicMeter() async {
@@ -431,13 +816,12 @@ final class SessionCoordinator: ObservableObject {
     private func stopMicMeter() {
         isMonitoringMic = false
         audio.stopMicMonitor()
-        audio.deactivate()
         micLevel = 0
         diag("mic meter: stopped")
     }
 
     /// Resolve a JPEG to send to Claude: a photo's own bytes, or a mid-clip frame
-    /// extracted from a video (the backend's vision call takes a single image).
+    /// extracted from a video.
     private static func imageJPEG(from media: CapturedMedia) async -> Data? {
         switch media.kind {
         case .photo(let data):
@@ -450,5 +834,39 @@ final class SessionCoordinator: ObservableObject {
             guard let result = try? await generator.image(at: time) else { return nil }
             return UIImage(cgImage: result.image).jpegData(compressionQuality: 0.7)
         }
+    }
+
+    private static func silentWAV() -> Data {
+        let sampleRate: UInt32 = 16_000
+        let samples: UInt32 = sampleRate
+        let dataBytes: UInt32 = samples * 2
+        var data = Data()
+        data.append("RIFF".data(using: .ascii)!)
+        data.append(littleEndianUInt32: 36 + dataBytes)
+        data.append("WAVE".data(using: .ascii)!)
+        data.append("fmt ".data(using: .ascii)!)
+        data.append(littleEndianUInt32: 16)
+        data.append(littleEndianUInt16: 1)
+        data.append(littleEndianUInt16: 1)
+        data.append(littleEndianUInt32: sampleRate)
+        data.append(littleEndianUInt32: sampleRate * 2)
+        data.append(littleEndianUInt16: 2)
+        data.append(littleEndianUInt16: 16)
+        data.append("data".data(using: .ascii)!)
+        data.append(littleEndianUInt32: dataBytes)
+        data.append(Data(count: Int(dataBytes)))
+        return data
+    }
+}
+
+private extension Data {
+    mutating func append(littleEndianUInt16 value: UInt16) {
+        var value = value.littleEndian
+        Swift.withUnsafeBytes(of: &value) { append(contentsOf: $0) }
+    }
+
+    mutating func append(littleEndianUInt32 value: UInt32) {
+        var value = value.littleEndian
+        Swift.withUnsafeBytes(of: &value) { append(contentsOf: $0) }
     }
 }

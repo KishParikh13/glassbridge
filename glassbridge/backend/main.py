@@ -78,6 +78,7 @@ async def ask(
     context_frames: list[UploadFile] = File(default=[]),
     session_id: str | None = Form(default=None),
     text_override: str | None = Form(default=None),
+    model: str | None = Form(default=None),
 ) -> StreamingResponse:
     state: AppState = app.state.gb
     t_start = time.perf_counter()
@@ -122,6 +123,7 @@ async def ask(
             history=history,
             context_images=context_bytes,
             session_id=session_id,
+            model=model,
         )
     )
     t_llm = time.perf_counter() - t0

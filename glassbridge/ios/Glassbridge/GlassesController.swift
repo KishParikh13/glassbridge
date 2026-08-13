@@ -4,19 +4,16 @@ import CoreMedia
 import MWDATCore
 import MWDATCamera
 
-/// Owns DAT registration + DeviceSession + Stream lifecycle, exposes capturePhoto().
+/// Owns DAT registration, device/compatibility observation, camera permission, and
+/// the camera `Stream`. Session creation is delegated to `GlassesSessionManager`
+/// (deferred + race-free). Exposes one user-facing `connectionState`.
+///
+/// Differs from the original by following Meta's canonical CameraAccess pattern:
+/// permission is requested lazily at stream start, device compatibility is
+/// monitored (firmware updates surfaced), the session manager races state-vs-error
+/// streams, and typed SDK errors are mapped to plain language via `DATErrorText`.
 @MainActor
 final class GlassesController: ObservableObject {
-    enum Status: String {
-        case unconfigured       // Wearables not yet configured / unavailable
-        case available          // Meta AI present, not yet registered
-        case registering
-        case registered         // Registered but no eligible device available
-        case waitingForDevice   // Stream waiting for the glasses to wake up
-        case streaming          // Stream live, can capture
-        case failed
-    }
-
     enum Quality: String, CaseIterable {
         case low, medium, high
         var label: String {
@@ -26,38 +23,57 @@ final class GlassesController: ObservableObject {
             case .high: return "High · 720×1280"
             }
         }
+        var resolution: StreamingResolution {
+            switch self {
+            case .low: return .low
+            case .medium: return .medium
+            case .high: return .high
+            }
+        }
     }
     static let frameRateOptions = [2, 7, 15, 24, 30]
 
-    @Published private(set) var status: Status = .unconfigured
-    @Published private(set) var deviceId: String? = nil
-    @Published private(set) var lastError: String? = nil
+    // User-facing state.
+    @Published private(set) var connectionState: ConnectionState = .usingPhone
+    @Published private(set) var deviceId: String?
+    @Published private(set) var lastError: String?
+    @Published private(set) var requiresFirmwareUpdate = false
     @Published private(set) var debugLog: [String] = []
-    @Published private(set) var cameraPermission: String = "unknown"
-    @Published private(set) var micPermission: String = "unknown"
-    @Published private(set) var isRecording: Bool = false
+    @Published private(set) var cameraPermission = "unknown"
+    @Published private(set) var micPermission = "unknown"
+    @Published private(set) var isRecording = false
 
-    // Live diagnostics for the Camera / Debug tabs.
+    // Live diagnostics for the Live / More tabs.
     @Published var previewEnabled = false
     @Published private(set) var previewImage: UIImage?
     @Published private(set) var measuredFPS: Double = 0
-    @Published private(set) var lastFrameSize: String = ""
+    @Published private(set) var lastFrameSize = ""
     @Published private(set) var lastPhotoLatencyMs: Int?
     @Published private(set) var quality: Quality = .medium
-    @Published private(set) var frameRate: Int = 15
+    @Published private(set) var frameRate = 15
 
-    // Live "rolling context" (#1): when on, recent frames are kept so the next
-    // ASK can be sent with temporal awareness. Never auto-speaks.
+    // Rolling context (#1): recent frames kept so the next ASK has temporal awareness.
     @Published var contextCaptureEnabled = false
     @Published private(set) var contextFrameCount = 0
 
-    private func log(_ s: String) {
-        let stamp = ISO8601DateFormatter().string(from: Date()).suffix(8)
-        debugLog.append("\(stamp) \(s)")
-        if debugLog.count > 12 { debugLog.removeFirst(debugLog.count - 12) }
+    /// True while the glasses camera stream is actively being used.
+    var isStreaming: Bool { connectionState == .streaming }
+
+    /// True when glasses are connected enough for an on-demand camera action.
+    var canCaptureFromGlasses: Bool {
+        connectionState == .connected || connectionState == .streaming || connectionState == .needsCameraPermission
     }
 
-    private var deviceSession: DeviceSession?
+    // MARK: - Internal state used to derive connectionState
+    private var registrationState: RegistrationState = .unavailable
+    private var streamState: StreamState?
+    private var cameraPermissionDenied = false
+    private var firmwareUpdateMessage: String?
+    private var isStartingStream = false
+    private var hasDeviceWaitTimedOut = false
+    private var deviceWaitTimeoutTask: Task<Void, Never>?
+
+    private var sessionManager: GlassesSessionManager?
     private var stream: MWDATCamera.Stream?
 
     private var stateToken: (any AnyListenerToken)?
@@ -66,63 +82,217 @@ final class GlassesController: ObservableObject {
     private var videoFrameToken: (any AnyListenerToken)?
     private let videoRecorder = VideoRecorder()
 
-    private var photoContinuation: CheckedContinuation<Data, Error>? = nil
+    private var registrationTask: Task<Void, Never>?
+    private var devicesTask: Task<Void, Never>?
+    private var deviceCompatibility: [DeviceIdentifier: Compatibility] = [:]
+    private var compatibilityTokens: [DeviceIdentifier: any AnyListenerToken] = [:]
+
+    private var photoContinuation: CheckedContinuation<Data, Error>?
     private let photoLock = NSLock()
+
+    private func log(_ s: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date()).suffix(8)
+        debugLog.append("\(stamp) \(s)")
+        if debugLog.count > 16 { debugLog.removeFirst(debugLog.count - 16) }
+    }
+
+    // MARK: - Lifecycle
 
     func start() {
         guard GlassbridgeApp.wearablesConfigured else {
-            status = .unconfigured
             lastError = GlassbridgeApp.wearablesConfigureError ?? "Wearables.configure() not called"
+            connectionState = .usingPhone
             return
         }
-        observeRegistration()
-        observeDevices()
-        // If we re-launched into an already-registered state, the stream may not
-        // re-emit .registered. Kick the permission flow + session creation here too.
-        if Wearables.shared.registrationState == .registered {
-            status = .registered
-            ensureCameraPermission()
-            maybeStartDeviceSession()
+        let wearables = Wearables.shared
+        registrationState = wearables.registrationState
+
+        let manager = GlassesSessionManager(wearables: wearables)
+        manager.onChange = { [weak self] in self?.updateConnectionState() }
+        sessionManager = manager
+
+        observeRegistration(wearables)
+        observeDevices(wearables)
+        refreshPermissions()
+        updateConnectionState()
+    }
+
+    private func observeRegistration(_ wearables: WearablesInterface) {
+        registrationTask = Task { [weak self] in
+            for await state in wearables.registrationStateStream() {
+                guard let self else { return }
+                self.registrationState = state
+                self.log("registration: \(state)")
+                self.updateConnectionState()
+            }
         }
     }
 
-    /// Manual retry hook for the UI when stuck in "registered · no device".
-    func requestCameraPermissionAgain() {
-        cameraPermissionRequested = false
-        ensureCameraPermission()
+    private func observeDevices(_ wearables: WearablesInterface) {
+        devicesTask = Task { [weak self] in
+            for await ids in wearables.devicesStream() {
+                guard let self else { return }
+                self.deviceId = ids.first
+                self.log("devices: count=\(ids.count)")
+                self.monitorCompatibility(ids, wearables: wearables)
+                self.updateConnectionState()
+            }
+        }
     }
 
-    func register() {
+    // MARK: - Compatibility (firmware) monitoring
+
+    private func monitorCompatibility(_ ids: [DeviceIdentifier], wearables: WearablesInterface) {
+        let present = Set(ids)
+        compatibilityTokens = compatibilityTokens.filter { present.contains($0.key) }
+        deviceCompatibility = deviceCompatibility.filter { present.contains($0.key) }
+        for id in ids {
+            guard compatibilityTokens[id] == nil, let device = wearables.deviceForIdentifier(id) else { continue }
+            deviceCompatibility[id] = device.compatibility()
+            let token = device.addCompatibilityListener { [weak self] compatibility in
+                Task { @MainActor in self?.handleCompatibility(compatibility, id: id) }
+            }
+            compatibilityTokens[id] = token
+        }
+        refreshFirmwareState()
+    }
+
+    private func handleCompatibility(_ compatibility: Compatibility, id: DeviceIdentifier) {
+        deviceCompatibility[id] = compatibility
+        refreshFirmwareState()
+    }
+
+    private func refreshFirmwareState() {
+        let needsUpdate = deviceCompatibility.values.contains(.deviceUpdateRequired)
+            || deviceCompatibility.values.contains(.sdkUpdateRequired)
+        requiresFirmwareUpdate = needsUpdate
+        firmwareUpdateMessage = needsUpdate
+            ? "Your glasses need an update to work with Glassbridge. Open the update in Meta AI, then reconnect."
+            : nil
+        updateConnectionState()
+    }
+
+    // MARK: - connectionState derivation
+
+    private func updateConnectionState() {
+        guard GlassbridgeApp.wearablesConfigured else { connectionState = .usingPhone; return }
+        if streamState == .streaming { connectionState = .streaming; return }
+        if let msg = firmwareUpdateMessage { connectionState = .needsDeviceUpdate(msg); return }
+
+        switch registrationState {
+        case .unavailable:
+            cancelDeviceWaitTimeout()
+            connectionState = .usingPhone
+        case .available:
+            cancelDeviceWaitTimeout()
+            connectionState = .readyToConnect
+        case .registering:
+            cancelDeviceWaitTimeout()
+            connectionState = .registering
+        case .registered:
+            if !(sessionManager?.hasActiveDevice ?? false) {
+                beginDeviceWaitTimeout()
+                if hasDeviceWaitTimedOut {
+                    connectionState = .problem("Make sure glasses are on and open, then try again.")
+                } else {
+                    connectionState = .connecting
+                }
+            } else if cameraPermissionDenied {
+                cancelDeviceWaitTimeout()
+                connectionState = .needsCameraPermission
+            } else {
+                cancelDeviceWaitTimeout()
+                connectionState = .connected
+            }
+        @unknown default:
+            cancelDeviceWaitTimeout()
+            connectionState = .usingPhone
+        }
+    }
+
+    private func beginDeviceWaitTimeout() {
+        guard deviceWaitTimeoutTask == nil, !hasDeviceWaitTimedOut else { return }
+        deviceWaitTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.hasDeviceWaitTimedOut = true
+                self.deviceWaitTimeoutTask = nil
+                self.log("devices: wait timed out")
+                self.updateConnectionState()
+            }
+        }
+    }
+
+    private func cancelDeviceWaitTimeout() {
+        deviceWaitTimeoutTask?.cancel()
+        deviceWaitTimeoutTask = nil
+        hasDeviceWaitTimedOut = false
+    }
+
+    // MARK: - Connect / disconnect
+
+    func connect() {
+        guard GlassbridgeApp.wearablesConfigured, registrationState != .registering else { return }
+        lastError = nil
+        cancelDeviceWaitTimeout()
+        Task { [weak self] in
+            guard let self else { return }
+            self.log("connect: startRegistration()")
+            do {
+                try await Wearables.shared.startRegistration()
+            } catch {
+                // Calling through the `any WearablesInterface` existential erases the
+                // typed throw to `any Error`, so downcast to inspect the case.
+                let regError = error as? RegistrationError
+                if regError == .alreadyRegistered { self.updateConnectionState(); return }
+                let text = DATErrorText.describe(error)
+                self.lastError = text
+                self.connectionState = (regError == .metaAINotInstalled) ? .metaAINotInstalled : .problem(text)
+                self.log("connect: ERROR \(error)")
+            }
+        }
+    }
+
+    func unregister() {
         guard GlassbridgeApp.wearablesConfigured else { return }
         Task { [weak self] in
             guard let self else { return }
-            await MainActor.run {
-                self.status = .registering
-                self.log("registration: startRegistration()")
-            }
-            do {
-                try await Wearables.shared.startRegistration()
-                await MainActor.run { self.log("registration: returned ok") }
-            } catch {
-                await MainActor.run {
-                    self.lastError = "startRegistration: \(error)"
-                    self.status = .failed
-                    self.log("registration: ERROR \(error)")
-                }
-            }
+            self.log("unregister")
+            try? await Wearables.shared.startUnregistration()
+            self.teardownStream()
+            self.updateConnectionState()
         }
     }
 
-    /// Re-check camera + microphone permission status without triggering a request.
+    func openFirmwareUpdate() {
+        guard GlassbridgeApp.wearablesConfigured else { return }
+        Task { [weak self] in
+            do { try await Wearables.shared.openFirmwareUpdate() }
+            catch { self?.lastError = DATErrorText.describe(error) }
+        }
+    }
+
+    func openDATGlassesAppUpdate() {
+        guard GlassbridgeApp.wearablesConfigured else { return }
+        Task { [weak self] in
+            do { try await Wearables.shared.openDATGlassesAppUpdate() }
+            catch { self?.lastError = DATErrorText.describe(error) }
+        }
+    }
+
+    // MARK: - Permissions (lazy)
+
     func refreshPermissions() {
         guard GlassbridgeApp.wearablesConfigured else { return }
         Task { [weak self] in
             guard let self else { return }
             if let cam = try? await Wearables.shared.checkPermissionStatus(.camera) {
-                await MainActor.run { self.cameraPermission = "\(cam)" }
+                self.cameraPermission = "\(cam)"
             }
             if let mic = try? await Wearables.shared.checkPermissionStatus(.microphone) {
-                await MainActor.run { self.micPermission = "\(mic)" }
+                self.micPermission = "\(mic)"
             }
         }
     }
@@ -130,217 +300,146 @@ final class GlassesController: ObservableObject {
     func requestMicPermission() {
         guard GlassbridgeApp.wearablesConfigured else { return }
         Task { [weak self] in
-            guard let self else { return }
-            await MainActor.run { self.log("mic: requestPermission(.microphone)") }
             if let result = try? await Wearables.shared.requestPermission(.microphone) {
-                await MainActor.run {
-                    self.micPermission = "\(result)"
-                    self.log("mic: result=\(result)")
-                }
+                self?.micPermission = "\(result)"
             }
         }
     }
 
-    /// Unregister the app from Meta AI (resets the pairing for testing).
-    func unregister() {
-        guard GlassbridgeApp.wearablesConfigured else { return }
-        Task { [weak self] in
-            guard let self else { return }
-            await MainActor.run { self.log("unregister: startUnregistration()") }
-            do {
-                try await Wearables.shared.startUnregistration()
-                await MainActor.run {
-                    self.teardownStream()
-                    self.deviceSession = nil
-                    self.status = .available
-                    self.log("unregister: ok")
-                }
-            } catch {
-                await MainActor.run { self.log("unregister: ERROR \(error)") }
-            }
-        }
-    }
+    // MARK: - Streaming
 
-    private func observeRegistration() {
-        Task { [weak self] in
-            for await state in Wearables.shared.registrationStateStream() {
-                guard let self else { return }
-                await MainActor.run {
-                    switch state {
-                    case .registered:
-                        self.ensureCameraPermission()
-                        self.maybeStartDeviceSession()
-                    case .registering:
-                        self.status = .registering
-                    case .available:
-                        self.status = .available
-                    case .unavailable:
-                        self.status = .unconfigured
-                    @unknown default:
-                        break
-                    }
-                }
-            }
-        }
-    }
+    /// Start the glasses camera stream for an explicit capture/recording action.
+    /// The UI should not keep this running just because glasses are connected.
+    func startStreaming() async {
+        guard GlassbridgeApp.wearablesConfigured, let sessionManager else { return }
+        guard streamState != .streaming, !isStartingStream else { return }
+        isStartingStream = true
+        defer { isStartingStream = false }
 
-    /// DAT SDK won't put glasses in `devicesStream()` until the app holds at least
-    /// one device permission. Requesting `.camera` triggers a Meta AI flow that grants
-    /// it; once granted, the glasses appear and DeviceSession creation can succeed.
-    private var cameraPermissionRequested = false
-    private func ensureCameraPermission() {
-        guard !cameraPermissionRequested else { log("cam: already requested this session, skipping"); return }
-        cameraPermissionRequested = true
-        log("cam: check status")
-        Task { [weak self] in
-            guard let self else { return }
-            do {
-                let current = try await Wearables.shared.checkPermissionStatus(.camera)
-                await MainActor.run {
-                    self.cameraPermission = "\(current)"
-                    self.log("cam: status=\(current)")
-                }
-                if current == .granted {
-                    await MainActor.run { self.maybeStartDeviceSession() }
-                    return
-                }
-                await MainActor.run { self.log("cam: requestPermission(.camera) — bouncing to Meta AI") }
-                let result = try await Wearables.shared.requestPermission(.camera)
-                await MainActor.run {
-                    self.cameraPermission = "\(result)"
-                    self.log("cam: result=\(result)")
-                    if result == .granted {
-                        self.maybeStartDeviceSession()
-                    } else {
-                        self.lastError = "Camera permission denied. Open Meta AI > App Connections > Glassbridge, or re-tap the button."
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    self.log("cam: ERROR \(error)")
-                    self.lastError = "requestPermission(.camera) threw: \(error)"
-                }
+        // 1. Camera permission — checked/requested HERE, not at registration.
+        do {
+            var status = try await Wearables.shared.checkPermissionStatus(.camera)
+            if status != .granted {
+                self.log("permission: requesting camera")
+                status = try await Wearables.shared.requestPermission(.camera)
             }
-        }
-    }
-
-    private func observeDevices() {
-        Task { [weak self] in
-            for await devices in Wearables.shared.devicesStream() {
-                guard let self else { return }
-                await MainActor.run {
-                    self.deviceId = devices.first
-                    self.log("devicesStream: count=\(devices.count) first=\(devices.first ?? "nil")")
-                    self.maybeStartDeviceSession()
-                }
+            cameraPermission = "\(status)"
+            guard status == .granted else {
+                cameraPermissionDenied = true
+                updateConnectionState()
+                return
             }
-        }
-    }
-
-    /// Create the DeviceSession + Stream once we're registered AND a device is visible.
-    private func maybeStartDeviceSession() {
-        guard deviceSession == nil else { return }
-        guard Wearables.shared.registrationState == .registered else { return }
-        guard !(Wearables.shared.devices.isEmpty) else {
-            status = .registered
+            cameraPermissionDenied = false
+        } catch {
+            lastError = DATErrorText.describe(error)
+            connectionState = .problem(lastError ?? "")
+            log("permission: ERROR \(error)")
             return
         }
 
+        // 2. A started device session (racing the error stream inside the manager).
+        let session: DeviceSession
         do {
-            let selector = AutoDeviceSelector(wearables: Wearables.shared)
-            let session = try Wearables.shared.createSession(deviceSelector: selector)
-            try session.start()
-            self.deviceSession = session
-            startStream()
+            session = try await sessionManager.getSession()
+        } catch DeviceSessionError.datAppOnTheGlassesUpdateRequired {
+            firmwareUpdateMessage = DATErrorText.describe(DeviceSessionError.datAppOnTheGlassesUpdateRequired)
+            updateConnectionState()
+            return
         } catch {
-            lastError = "createSession: \(error)"
-            status = .failed
+            lastError = DATErrorText.describe(error)
+            connectionState = .problem(lastError ?? "")
+            log("getSession: ERROR \(error)")
+            return
         }
+
+        // 3. Add + start the camera stream.
+        startStream(on: session)
     }
 
-    /// Build the camera stream on the current session using the selected
-    /// quality/frameRate and wire up its publishers.
-    private func startStream() {
-        guard let session = deviceSession, stream == nil else { return }
+    private func startStream(on session: DeviceSession) {
+        guard stream == nil else { return }
         do {
-            let config: StreamConfiguration
-            switch quality {
-            case .low:
-                config = StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: frameRate)
-            case .medium:
-                config = StreamConfiguration(videoCodec: .raw, resolution: .medium, frameRate: frameRate)
-            case .high:
-                config = StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: frameRate)
-            }
+            let config = StreamConfiguration(videoCodec: .raw, resolution: quality.resolution, frameRate: UInt(frameRate))
             guard let stream = try session.addStream(config: config) else {
                 throw NSError(domain: "GlassesController", code: 10,
                               userInfo: [NSLocalizedDescriptionKey: "addStream returned nil"])
             }
             self.stream = stream
 
-            self.stateToken = stream.statePublisher.listen { [weak self] state in
-                Task { @MainActor in
-                    guard let self else { return }
-                    switch state {
-                    case .streaming: self.status = .streaming
-                    case .waitingForDevice, .starting: self.status = .waitingForDevice
-                    case .stopped, .stopping: self.status = .registered
-                    case .paused: self.status = .waitingForDevice
-                    @unknown default: break
-                    }
-                }
+            stateToken = stream.statePublisher.listen { [weak self] state in
+                Task { @MainActor in self?.handleStreamState(state) }
             }
-            self.photoToken = stream.photoDataPublisher.listen { [weak self] photoData in
+            photoToken = stream.photoDataPublisher.listen { [weak self] photoData in
                 let data = photoData.data
-                Task { @MainActor in
-                    self?.deliverPhoto(.success(data))
-                }
+                Task { @MainActor in self?.deliverPhoto(.success(data)) }
             }
-            self.errorToken = stream.errorPublisher.listen { [weak self] err in
-                Task { @MainActor in
-                    self?.lastError = "stream error: \(err)"
-                }
+            errorToken = stream.errorPublisher.listen { [weak self] err in
+                Task { @MainActor in self?.handleStreamError(err) }
             }
-            // Capture the recorder locally so the publisher thread never touches
-            // MainActor-isolated `self`. The recorder ignores frames unless a
-            // recording is in progress, so the always-on listener is cheap; the
-            // hop to `onVideoFrame` drives the live preview + FPS readout.
             let recorder = self.videoRecorder
-            self.videoFrameToken = stream.videoFramePublisher.listen { [weak self] frame in
+            videoFrameToken = stream.videoFramePublisher.listen { [weak self] frame in
                 recorder.append(frame.sampleBuffer)
                 Task { @MainActor in self?.onVideoFrame(frame) }
             }
             log("stream: \(quality.rawValue) @ \(frameRate)fps")
             Task { await stream.start() }
         } catch {
-            lastError = "addStream: \(error)"
-            status = .failed
+            lastError = DATErrorText.describe(error)
+            connectionState = .problem(lastError ?? "")
+            log("addStream: ERROR \(error)")
         }
     }
 
+    private func handleStreamState(_ state: StreamState) {
+        streamState = state
+        switch state {
+        case .stopped, .stopping:
+            // Stream ended — drop it so a fresh one is added on next start.
+            previewImage = nil
+            measuredFPS = 0
+        case .streaming, .waitingForDevice, .starting, .paused:
+            break
+        @unknown default:
+            break
+        }
+        updateConnectionState()
+    }
+
+    private func handleStreamError(_ error: StreamError) {
+        let text = DATErrorText.describe(error)
+        lastError = text
+        log("stream error: \(error)")
+        // Battery/thermal/disconnect end the stream; reflect that the glasses aren't live.
+        if streamState != .streaming { connectionState = .problem(text) }
+    }
+
     private func teardownStream() {
-        stream?.stop()
+        if let stream { Task { await stream.stop() } }
         stateToken = nil
         photoToken = nil
         errorToken = nil
         videoFrameToken = nil
         stream = nil
+        streamState = nil
         previewImage = nil
         measuredFPS = 0
     }
 
-    /// Apply new camera quality. If a session is live the stream is rebuilt;
-    /// otherwise the settings take effect when streaming next starts.
+    func stopStreaming() {
+        teardownStream()
+        updateConnectionState()
+    }
+
+    /// Apply new camera quality/frame rate. Rebuilds the stream if one is live.
     func applyStreamSettings(quality: Quality, frameRate: Int) {
         self.quality = quality
         self.frameRate = frameRate
-        guard deviceSession != nil else { return }
+        guard stream != nil else { return }
         teardownStream()
-        status = .registered
-        startStream()
+        Task { await startStreaming() }
     }
 
-    // MARK: – Live frame diagnostics
+    // MARK: - Live frame diagnostics + rolling context
 
     private var fpsWindowStart = Date()
     private var fpsCount = 0
@@ -382,7 +481,6 @@ final class GlassesController: ObservableObject {
         }
     }
 
-    /// Snapshot of the rolling context frames (oldest→newest) to attach to an ASK.
     func recentContextFrames() -> [Data] { contextFrames }
 
     func clearContextFrames() {
@@ -404,25 +502,22 @@ final class GlassesController: ObservableObject {
         return resized.jpegData(compressionQuality: quality)
     }
 
-    /// Capture one JPEG from the glasses, blocking up to `timeout` seconds.
-    func capturePhoto(timeout: TimeInterval = 4.0) async throws -> Data {
-        guard let stream else {
-            throw NSError(
-                domain: "GlassesController", code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Stream not initialized. Pair your glasses first."]
-            )
-        }
-        // Wait briefly for streaming state.
-        let waitStart = Date()
-        while status != .streaming {
-            if Date().timeIntervalSince(waitStart) > timeout {
-                throw NSError(
-                    domain: "GlassesController", code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Glasses not streaming (status=\(status.rawValue))."]
-                )
+    // MARK: - Capture
+
+    /// Capture one JPEG from the glasses, starting and stopping the stream on demand.
+    func capturePhoto(timeout: TimeInterval = 6.0) async throws -> Data {
+        let startedForPhoto = streamState != .streaming
+        if startedForPhoto { await startStreaming() }
+        defer {
+            if startedForPhoto && !isRecording {
+                stopStreaming()
             }
-            try await Task.sleep(nanoseconds: 100_000_000)
         }
+        guard let stream else {
+            throw NSError(domain: "GlassesController", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Glasses aren't streaming. Connect your glasses first."])
+        }
+        try await waitUntilStreaming(timeout: timeout)
 
         let t0 = Date()
         let data: Data = try await withCheckedThrowingContinuation { cont in
@@ -433,45 +528,61 @@ final class GlassesController: ObservableObject {
             if !queued {
                 self.deliverPhoto(.failure(NSError(
                     domain: "GlassesController", code: 4,
-                    userInfo: [NSLocalizedDescriptionKey: "capturePhoto refused (stream not ready)."]
-                )))
+                    userInfo: [NSLocalizedDescriptionKey: "capturePhoto refused (stream not ready)."])))
                 return
             }
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 self?.deliverPhoto(.failure(NSError(
                     domain: "GlassesController", code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: "Photo capture timed out."]
-                )))
+                    userInfo: [NSLocalizedDescriptionKey: "Photo capture timed out."])))
             }
         }
         lastPhotoLatencyMs = Int(Date().timeIntervalSince(t0) * 1000)
         return data
     }
 
-    /// Begin recording the live glasses video feed to an .mp4. Frames are pulled
-    /// from `videoFramePublisher` (wired up in startStream).
-    func startVideoRecording() throws {
-        guard stream != nil else {
-            throw NSError(domain: "GlassesController", code: 21,
-                          userInfo: [NSLocalizedDescriptionKey: "Stream not initialized. Pair your glasses first."])
+    func testCameraOnce() async {
+        do {
+            _ = try await capturePhoto()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
         }
-        guard status == .streaming else {
-            throw NSError(domain: "GlassesController", code: 22,
-                          userInfo: [NSLocalizedDescriptionKey: "Glasses not streaming (status=\(status.rawValue))."])
+    }
+
+    func startVideoRecording() async throws {
+        if streamState != .streaming { await startStreaming() }
+        if streamState != .streaming {
+            try await waitUntilStreaming(timeout: 6.0)
+        }
+        guard stream != nil, streamState == .streaming else {
+            throw NSError(domain: "GlassesController", code: 21,
+                          userInfo: [NSLocalizedDescriptionKey: "Glasses aren't streaming. Connect your glasses first."])
         }
         videoRecorder.start()
         isRecording = true
     }
 
-    /// Stop recording and return the finished .mp4 URL.
     func stopVideoRecording() async throws -> URL {
         isRecording = false
         guard let url = await videoRecorder.finish() else {
             throw NSError(domain: "GlassesController", code: 23,
                           userInfo: [NSLocalizedDescriptionKey: "No video was recorded."])
         }
+        stopStreaming()
         return url
+    }
+
+    private func waitUntilStreaming(timeout: TimeInterval) async throws {
+        let waitStart = Date()
+        while streamState != .streaming {
+            if Date().timeIntervalSince(waitStart) > timeout {
+                throw NSError(domain: "GlassesController", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: lastError ?? "Glasses didn't start streaming."])
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
     }
 
     private func deliverPhoto(_ result: Result<Data, Error>) {

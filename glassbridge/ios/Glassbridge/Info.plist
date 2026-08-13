@@ -35,6 +35,8 @@
 	<array>
 		<string>fb-viewapp</string>
 	</array>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>MWDAT</key>
 	<dict>
 		<key>Analytics</key>
@@ -47,7 +49,7 @@
 		<key>MetaAppID</key>
 		<string>0</string>
 		<key>TeamID</key>
-		<string></string>
+		<string>GN3TH9WD6W</string>
 	</dict>
 	<key>NSAppTransportSecurity</key>
 	<dict>
@@ -64,12 +66,18 @@
 	<string>Glassbridge talks to the Glassbridge backend on your Mac over your local Wi-Fi network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Glassbridge sends voice queries to Claude through your Ray-Ban glasses.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Glassbridge listens on-device for your wake word so you can start a question hands-free.</string>
+	<key>NSSupportsLiveActivities</key>
+	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-peripheral</string>
 		<string>external-accessory</string>
 		<string>audio</string>
 	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict>
 		<key>UIColorName</key>
