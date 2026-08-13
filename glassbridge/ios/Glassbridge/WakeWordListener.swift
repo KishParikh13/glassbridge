@@ -17,7 +17,7 @@ final class WakeWordListener: ObservableObject {
         case off, listening, denied, unavailable
     }
 
-    enum Command: Equatable {
+    enum Command: String, Hashable {
         /// The trigger phrase. Starts a turn.
         case wake
         /// "never mind". Drops whatever is in flight.
@@ -56,12 +56,35 @@ final class WakeWordListener: ObservableObject {
         static let capturing: Scope = [.cancel, .sleep]
         /// A reply is playing, so "stop" finally has something to mean.
         static let speaking: Scope = [.cancel, .stopSpeaking, .sleep]
+
+        /// Readable in a log, which is where this mostly gets looked at.
+        var names: String {
+            var out: [String] = []
+            if contains(.wake) { out.append("wake") }
+            if contains(.cancel) { out.append("cancel") }
+            if contains(.stopSpeaking) { out.append("stop") }
+            if contains(.sleep) { out.append("sleep") }
+            return out.isEmpty ? "none" : out.joined(separator: "+")
+        }
+    }
+
+    /// A phrase the recognizer matched, and what the listener did about it.
+    ///
+    /// The out-of-scope case is the interesting one and the reason this exists at all:
+    /// hearing "stop" inside a question and declining to act is the scope design doing its
+    /// job, and from outside it is indistinguishable from not having heard you.
+    struct Observation {
+        var transcript: String
+        var command: Command
+        var armed: Bool
+        var scope: Scope
     }
 
     @Published private(set) var state: State = .off
     @Published private(set) var lastHeard: String = ""
 
     var onCommand: ((Command) -> Void)?
+    var onObservation: ((Observation) -> Void)?
 
     private let phrase: String
     private let phraseWords: [String]
@@ -73,6 +96,7 @@ final class WakeWordListener: ObservableObject {
     private var scope: Scope = .idle   // what counts right now
     private var generation = 0         // stale recognition callbacks drop themselves
     private var consumed = false       // a command already fired on this transcript
+    private var reported: Set<Command> = []   // matches already logged for this task
 
     /// Checked in order, so a longer phrase wins over a shorter one that overlaps it.
     private static let controlPhrases: [(command: Command, words: [String])] = [
@@ -135,6 +159,7 @@ final class WakeWordListener: ObservableObject {
             generation += 1
             let myGeneration = generation
             consumed = false
+            reported.removeAll()
 
             // Capture the request rather than self, so the audio thread never touches an
             // actor-isolated object.
@@ -168,17 +193,34 @@ final class WakeWordListener: ObservableObject {
         lastHeard = transcript.lowercased()
 
         let heard = Self.words(in: transcript)
-        if scope.contains(.wake), Self.contains(phraseWords, in: heard) {
-            fire(.wake)
-            return
+        if Self.contains(phraseWords, in: heard) {
+            observe(transcript, .wake)
+            if scope.contains(.wake) {
+                fire(.wake)
+                return
+            }
         }
         for entry in Self.controlPhrases {
-            guard scope.contains(entry.command.flag) else { continue }
-            if Self.contains(entry.words, in: heard) {
+            guard Self.contains(entry.words, in: heard) else { continue }
+            observe(transcript, entry.command)
+            if scope.contains(entry.command.flag) {
                 fire(entry.command)
                 return
             }
         }
+    }
+
+    /// Report a match once per recognition task. Partial transcripts only grow, so a word
+    /// that matched keeps matching on every update after it, and without this the log
+    /// would be nothing but repeats.
+    private func observe(_ transcript: String, _ command: Command) {
+        guard reported.insert(command).inserted else { return }
+        onObservation?(Observation(
+            transcript: transcript.lowercased(),
+            command: command,
+            armed: scope.contains(command.flag),
+            scope: scope
+        ))
     }
 
     private func fire(_ command: Command) {

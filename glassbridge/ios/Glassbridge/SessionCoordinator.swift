@@ -50,6 +50,18 @@ final class SessionCoordinator: ObservableObject {
             case .error(let msg): return "Error: \(msg)"
             }
         }
+
+        /// Bare state name for the log. The user-facing `label` has ellipses and copy in
+        /// it, which reads badly on a timeline.
+        var recordLabel: String {
+            switch self {
+            case .idle: return "idle"
+            case .listening: return "listening"
+            case .thinking: return "thinking"
+            case .speaking: return "speaking"
+            case .error: return "error"
+            }
+        }
     }
 
     @Published var phase: Phase = .idle {
@@ -58,6 +70,7 @@ final class SessionCoordinator: ObservableObject {
             // What the listener is armed for follows the phase exactly: "stop" only means
             // something while a reply is playing, the trigger phrase only while idle.
             syncListenerScope()
+            recorder.log(.phase, phase.recordLabel)
         }
     }
     @Published var transcript: String = ""
@@ -72,6 +85,7 @@ final class SessionCoordinator: ObservableObject {
     private let iPhoneVideo = IPhoneVideoRecorder()
     private let liveActivity = LiveActivityController()
     private let earcons = Earcons()
+    let recorder = SessionRecorder()
     private var isBusy = false
 
     /// The turn in flight, held so a spoken "never mind" can cancel it.
@@ -274,6 +288,11 @@ final class SessionCoordinator: ObservableObject {
         // is what used to make a reply impossible to interrupt.
         defer { earcons.stopThinking() }
 
+        recorder.begin(route: audio.routeSummary())
+        var outcome = "completed"
+        var stt: Double?
+        var llm: Double?
+
         transcript = ""
         reply = ""
         latencySummary = ""
@@ -303,7 +322,7 @@ final class SessionCoordinator: ObservableObject {
                 captureSource = useGlasses ? "glasses + \(micLabel)" : "iPhone camera + iPhone mic"
                 if let textOverride {
                     image = try await (useGlasses ? glasses.capturePhoto() : iPhoneCapture.capturePhoto())
-                    earcons.play(.captured)
+                    cue(.captured)
                     transcript = textOverride
                     wav = nil
                     audioData = Self.silentWAV()
@@ -317,8 +336,11 @@ final class SessionCoordinator: ObservableObject {
                     // to the light, so it is worth nothing if it waits for the recording
                     // to endpoint first.
                     image = try await photoData
-                    earcons.play(.captured)
-                    wav = try await audioURL
+                    cue(.captured)
+                    recorder.log(.capture, "photo", detail: "\(image.count) bytes · \(captureSource)")
+                    let recorded = try await audioURL
+                    recorder.log(.recording, "endpointed", detail: Self.wavSummary(recorded))
+                    wav = recorded
                     audioData = nil
                 }
             }
@@ -338,6 +360,13 @@ final class SessionCoordinator: ObservableObject {
             )
             earcons.stopThinking()
             try Task.checkCancellation()
+
+            stt = result.sttLatency
+            llm = result.llmLatency
+            recorder.log(.backend, "reply", detail: String(
+                format: "stt %.2fs · llm %.2fs · %d mp3 bytes",
+                result.sttLatency ?? 0, result.llmLatency ?? 0, result.mp3.count
+            ))
 
             transcript = result.transcript ?? ""
             reply = result.reply ?? ""
@@ -361,15 +390,24 @@ final class SessionCoordinator: ObservableObject {
         } catch {
             if Self.isCancellation(error) {
                 print("[ASK] cancelled")
-                if !suppressCancelCue { earcons.play(.cancelled) }
+                outcome = "cancelled"
+                if !suppressCancelCue { cue(.cancelled) }
                 phase = .idle
             } else {
                 print("[ASK] failed: \(error.localizedDescription)")
-                earcons.play(.error)
+                outcome = "error: \(error.localizedDescription)"
+                cue(.error)
                 phase = .error(error.localizedDescription)
             }
         }
         suppressCancelCue = false
+        recorder.finish(
+            outcome: outcome,
+            transcript: transcript.isEmpty ? nil : transcript,
+            reply: reply.isEmpty ? nil : reply,
+            stt: stt,
+            llm: llm
+        )
 
         // The session deliberately stays active between asks. Tearing it down here is what
         // used to cut off the wake word listener and make a follow-up impossible.
@@ -518,9 +556,20 @@ final class SessionCoordinator: ObservableObject {
         UserDefaults.standard.set(on, forKey: wakeWordKey)
         if on {
             wake.onCommand = { [weak self] command in self?.handle(command) }
+            // Logged whether or not it fired. A match the scope declined is the whole
+            // point of having a scope, and it leaves no other trace.
+            wake.onObservation = { [weak self] observation in
+                self?.recorder.log(
+                    .heard,
+                    observation.command.rawValue,
+                    detail: observation.transcript,
+                    armed: observation.armed,
+                    scope: observation.scope.names
+                )
+            }
             wake.start()
             syncListenerScope()
-            if announce { earcons.play(.awake) }
+            if announce { cue(.awake) }
             liveActivity.start(status: "Ready", detail: "Say \u{201C}\(wake.triggerPhrase)\u{201D}")
         } else {
             wake.stop()
@@ -531,9 +580,10 @@ final class SessionCoordinator: ObservableObject {
     /// The spoken control surface. Which of these can fire at any given moment is settled
     /// by `syncListenerScope`, so nothing here has to second-guess the phase.
     private func handle(_ command: WakeWordListener.Command) {
+        recorder.log(.command, command.rawValue)
         switch command {
         case .wake:
-            earcons.play(.listening)
+            cue(.listening)
             Task { await runTurn(presetImage: nil) }
         case .cancel:
             cancelTurn()
@@ -543,10 +593,25 @@ final class SessionCoordinator: ObservableObject {
             // forget the question.
             audio.stopPlayback()
         case .sleep:
-            earcons.play(.asleep)
+            cue(.asleep)
             cancelTurn(silent: true)
             setWakeWord(false)
         }
+    }
+
+    /// Play a cue and note it, so the timeline lines up with what you actually heard.
+    private func cue(_ c: Earcons.Cue) {
+        earcons.play(c)
+        recorder.log(.earcon, String(describing: c))
+    }
+
+    /// 16kHz mono 16-bit, so bytes convert straight to seconds. Useful for checking
+    /// whether silence endpointing is cutting people off.
+    private static func wavSummary(_ url: URL) -> String {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let bytes = (attributes?[.size] as? Int) ?? 0
+        let seconds = Double(bytes) / (16_000 * 2)
+        return String(format: "%.2fs · %d bytes", seconds, bytes)
     }
 
     /// Drop the turn in flight. A false trigger captures first and this is how you take it

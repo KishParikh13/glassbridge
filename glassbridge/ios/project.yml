@@ -41,6 +41,10 @@ targets:
         NSLocalNetworkUsageDescription: "Glassbridge talks to the Glassbridge backend on your Mac over your local Wi-Fi network."
         NSSpeechRecognitionUsageDescription: "Glassbridge listens on-device for your wake word so you can start a question hands-free."
         NSSupportsLiveActivities: true
+        # Turn recordings land in Documents/recordings. These expose them in Files.app so
+        # they can come off the device without tethering mid-test. See SessionRecorder.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UIBackgroundModes:
           - bluetooth-peripheral
           - external-accessory
