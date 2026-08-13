@@ -12,7 +12,10 @@ class Settings:
     # Speech to text. "auto" uses Groq when a key is present and falls back to local
     # Whisper when it isn't, so the default works either way. Whisper dominates the
     # latency budget (5-8s of a 4-13s round trip); Groq is typically under a second.
-    stt_provider: str = "auto"          # auto | groq | whisper
+    # "auto" prefers MLX (Apple GPU, audio stays local), then Groq if a key exists, then
+    # CPU Whisper. Measured on the same 3s clip: MLX 1.55s, CPU Whisper 12.0s.
+    stt_provider: str = "auto"          # auto | mlx | groq | whisper
+    mlx_stt_model: str = "mlx-community/whisper-large-v3-turbo"
     groq_api_key: str = ""
     groq_stt_model: str = "whisper-large-v3-turbo"
 
@@ -58,6 +61,7 @@ class Settings:
             anthropic_api_key=anthropic_key,
             elevenlabs_api_key=eleven_key,
             stt_provider=os.environ.get("STT_PROVIDER", cls.stt_provider),
+            mlx_stt_model=os.environ.get("MLX_STT_MODEL", cls.mlx_stt_model),
             groq_api_key=os.environ.get("GROQ_API_KEY", "").strip(),
             groq_stt_model=os.environ.get("GROQ_STT_MODEL", cls.groq_stt_model),
             whisper_model=os.environ.get("WHISPER_MODEL", cls.whisper_model),

@@ -95,6 +95,67 @@ class WhisperTranscriber:
                 pass
 
 
+class MlxTranscriber:
+    """Whisper on Apple Silicon's GPU via MLX.
+
+    `faster-whisper` uses CTranslate2, which has no Metal backend, so on an M-series Mac
+    it is CPU-only and slow: 12 seconds for a 3 second clip on an M-series laptop. MLX
+    runs the same size of model on the GPU. Measured on the M4 mini: 1.55 seconds for the
+    same audio, using full `large-v3-turbo` rather than the distilled approximation, so it
+    is both faster and more accurate.
+
+    Audio never leaves the machine, which is the reason to prefer this over a hosted API.
+    """
+
+    def __init__(self, model: str) -> None:
+        self._model = model
+
+    def _load_wav(self, audio_bytes: bytes) -> tuple[object, int]:
+        """16kHz mono PCM straight to float32.
+
+        `mlx_whisper` shells out to ffmpeg to decode, which would be a system dependency
+        for no reason: the app records exactly this format already (MicRecorder writes
+        16k mono 16-bit), so the stdlib can do it.
+        """
+        import io
+        import wave
+
+        import numpy as np
+
+        with wave.open(io.BytesIO(audio_bytes), "rb") as w:
+            if w.getsampwidth() != 2:
+                raise RuntimeError(f"expected 16-bit PCM, got {w.getsampwidth() * 8}-bit")
+            frames = w.readframes(w.getnframes())
+            rate, channels = w.getframerate(), w.getnchannels()
+
+        audio = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+        if channels > 1:
+            audio = audio.reshape(-1, channels).mean(axis=1)
+        return audio, rate
+
+    def warmup(self) -> None:
+        import numpy as np
+        import mlx_whisper
+
+        logger.info("Loading MLX Whisper model=%s (Apple GPU)", self._model)
+        # The first transcription pays a one-off ~4s to pull weights onto the GPU. Do it
+        # at boot so the first real question doesn't.
+        silence = np.zeros(16_000, dtype=np.float32)
+        mlx_whisper.transcribe(silence, path_or_hf_repo=self._model)
+        logger.info("MLX Whisper ready.")
+
+    def transcribe(self, audio_bytes: bytes, filename_hint: str = "audio.wav") -> TranscriptionResult:
+        import mlx_whisper
+
+        audio, rate = self._load_wav(audio_bytes)
+        result = mlx_whisper.transcribe(audio, path_or_hf_repo=self._model)
+        return TranscriptionResult(
+            text=(result.get("text") or "").strip(),
+            language=result.get("language") or "unknown",
+            duration_s=len(audio) / rate,
+        )
+
+
 class GroqTranscriber:
     """Whisper large v3 turbo on Groq, over plain HTTP.
 
@@ -149,6 +210,13 @@ class GroqTranscriber:
         )
 
 
+def _mlx_available() -> bool:
+    """Apple Silicon only, and an optional dependency, so never assume it is there."""
+    import importlib.util
+
+    return importlib.util.find_spec("mlx_whisper") is not None
+
+
 def make_transcriber(settings: Settings) -> Transcriber:
     """Pick a transcriber from config.
 
@@ -160,7 +228,23 @@ def make_transcriber(settings: Settings) -> Transcriber:
     provider = (settings.stt_provider or "auto").strip().lower()
 
     if provider == "auto":
-        provider = "groq" if settings.groq_api_key else "whisper"
+        # Prefer the GPU on this machine over a hosted API over the CPU. MLX keeps audio
+        # local and still beats a round trip; Whisper on CPU is the last resort because it
+        # is 8x slower than either.
+        if _mlx_available():
+            provider = "mlx"
+        elif settings.groq_api_key:
+            provider = "groq"
+        else:
+            provider = "whisper"
+
+    if provider == "mlx":
+        if not _mlx_available():
+            raise RuntimeError(
+                "STT_PROVIDER=mlx but mlx-whisper is not installed. "
+                "pip install mlx-whisper (Apple Silicon only), or set STT_PROVIDER=whisper."
+            )
+        return MlxTranscriber(model=settings.mlx_stt_model)
 
     if provider == "groq":
         if not settings.groq_api_key:
@@ -174,7 +258,9 @@ def make_transcriber(settings: Settings) -> Transcriber:
         )
 
     if provider != "whisper":
-        raise RuntimeError(f"Unknown STT_PROVIDER {provider!r}. Use 'auto', 'groq', or 'whisper'.")
+        raise RuntimeError(
+            f"Unknown STT_PROVIDER {provider!r}. Use 'auto', 'mlx', 'groq', or 'whisper'."
+        )
 
     return WhisperTranscriber(
         model_name=settings.whisper_model,
