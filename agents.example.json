@@ -19,7 +19,7 @@
     {
       "id": "kishos",
       "label": "KishOS",
-      "wakePhrase": "hey kishos",
+      "wakePhrase": "hey claude",
       "description": "The personal chief of staff: corpus, ledger, goals, and its own tools.",
       "type": "gateway",
       "url": "http://127.0.0.1:17890/chat",

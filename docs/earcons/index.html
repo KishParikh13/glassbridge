@@ -78,9 +78,27 @@ thing here.
 <tr><td><div class="cue">Going quiet</div><div class="why">You said go to sleep. The wake word is off until you turn it back on.</div></td><td style="color:var(--dim);font-size:13px">asleep</td><td><button onclick="p('c-tactile-asleep.wav')">▶ Play</button><span class="ms">240 ms</span></td></tr>
 <tr><td><div class="cue">Listening again</div><div class="why">The wake word was switched back on.</div></td><td style="color:var(--dim);font-size:13px">awake</td><td><button onclick="p('c-tactile-awake.wav')">▶ Play</button><span class="ms">220 ms</span></td></tr>
 </table>
+<h2>Still working<span class="tag">continuous</span></h2>
+<p class="setnote">Replaces the repeating tick. These loop seamlessly and play under the whole wait, fading in after 1.2s and out when the reply starts. Quiet, low, and deliberately unlike speech, so they do not fight the wake recogniser that is still listening underneath. Let one run for a few seconds to hear the loop point, or rather to not hear it.</p>
+<table><tr><th>Option</th><th>Character</th><th></th></tr>
+<tr><td><div class="cue">Warm pad</div><div class="why">A soft major-ninth chord breathing on a 4s cycle. Elevator music without a melody you could get stuck on.</div></td><td style="color:var(--dim);font-size:13px">bed-pad</td><td><button onclick="loop('bed-pad.wav',this)">▶ Loop</button><span class="ms">4s cycle</span></td></tr>
+<tr><td><div class="cue">Two-chord pad</div><div class="why">The warm pad with somewhere to go: two chords crossfading over 8s. Movement without a tune, which wears better on a long wait.</div></td><td style="color:var(--dim);font-size:13px">bed-move</td><td><button onclick="loop('bed-move.wav',this)">▶ Loop</button><span class="ms">8s cycle</span></td></tr>
+<tr><td><div class="cue">Deep pad</div><div class="why">Lower and richer, breathing slowly on a 6s cycle. The least 'device' of them all and the easiest to talk over.</div></td><td style="color:var(--dim);font-size:13px">bed-deep</td><td><button onclick="loop('bed-deep.wav',this)">▶ Loop</button><span class="ms">6s cycle</span></td></tr>
+<tr><td><div class="cue">Rhodes</div><div class="why">Soft electric piano, two chords over 8s. The most straightforwardly hold music, in the good way.</div></td><td style="color:var(--dim);font-size:13px">bed-rhodes</td><td><button onclick="loop('bed-rhodes.wav',this)">▶ Loop</button><span class="ms">8s cycle</span></td></tr>
+<tr><td><div class="cue">Music box</div><div class="why">High sparse bells over a warm pad, 8s. The prettiest and the most distinctive — also the most likely to get noticed.</div></td><td style="color:var(--dim);font-size:13px">bed-box</td><td><button onclick="loop('bed-box.wav',this)">▶ Loop</button><span class="ms">8s cycle</span></td></tr>
+<tr><td><div class="cue">Simple arpeggio</div><div class="why">Four notes over a drone, 4s. The plainest musical option.</div></td><td style="color:var(--dim);font-size:13px">bed-hold</td><td><button onclick="loop('bed-hold.wav',this)">▶ Loop</button><span class="ms">4s cycle</span></td></tr>
+<tr><td><div class="cue">Low drone</div><div class="why">Two detuned low tones beating slowly. Not music; reads as 'on'.</div></td><td style="color:var(--dim);font-size:13px">bed-drone</td><td><button onclick="loop('bed-drone.wav',this)">▶ Loop</button><span class="ms">4s cycle</span></td></tr>
+</table>
 
 <script>
  function p(f){ const a=new Audio(f); a.play(); }
+ let looping=null, loopBtn=null;
+ function loop(f,btn){
+   if(looping){ looping.pause(); looping=null;
+     if(loopBtn){loopBtn.textContent='▶ Loop'; const b=loopBtn; loopBtn=null; if(b===btn) return;} }
+   looping=new Audio(f); looping.loop=true; looping.play();
+   loopBtn=btn; btn.textContent='■ Stop';
+ }
  function seq(set){
    const steps=[['listening',0],['captured',700],['thinking',1500],['thinking',3100],['cancelled',4600]];
    steps.forEach(([cue,delay])=>setTimeout(()=>p(set+'-'+cue+'.wav'),delay));

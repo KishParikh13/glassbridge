@@ -4,11 +4,11 @@ Everything is committed, pushed, and installed. Backend running on the mini.
 
 ## 1. KishOS has its own wake phrase  (~2 min)
 
-Say **"hey kishos, what should I focus on today"**.
+Say **"hey claude, what should I focus on today"**.
 
 Verified working overnight, same question to each:
   hey glass   -> "I don't know who you are."
-  hey kishos  -> "you're Kish. operator not IC, taste is your edge... right now the
+  hey claude  -> "you're Kish. operator not IC, taste is your edge... right now the
                   honest focus is close to home: your dad's treatment, Aarthi's visa."
 
 Settings -> Agents lists both phrases. An eye icon marks the one that can see.

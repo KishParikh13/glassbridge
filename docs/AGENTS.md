@@ -6,7 +6,7 @@ pluggable.** Each agent gets its own wake phrase, and adding one is an edit to
 
 ```
 "hey glass"   → the built-in agent: Claude, with eyes and web search
-"hey kishos"  → KishOS: personal corpus, ledger, goals, its own tools
+"hey claude"  → KishOS: personal corpus, ledger, goals, its own tools
 "hey <yours>" → whatever you point it at
 ```
 
@@ -27,7 +27,7 @@ Copy `agents.example.json` to `agents.json` and add an entry:
 {
   "id": "kishos",
   "label": "KishOS",
-  "wakePhrase": "hey kishos",
+  "wakePhrase": "hey claude",
   "type": "gateway",
   "url": "http://127.0.0.1:17890/chat",
   "healthUrl": "http://127.0.0.1:17890/health",
@@ -91,7 +91,7 @@ An agentic assistant is slower than one model call, and it shows.
 | | Round trip |
 |---|---|
 | `hey glass` | ~5.3s (stt 1.6 · llm 3.1 · tts 0.8) |
-| `hey kishos` | ~10.5s |
+| `hey claude` | ~10.5s |
 
 The thinking earcon holds back 1.2s before it starts ticking, which covers the first case
 entirely and makes the second audible as "working" rather than as "broken".

@@ -116,6 +116,173 @@ SET_C = {
 
 SETS = {"a-glass": SET_A, "b-warm": SET_B, "c-tactile": SET_C}
 
+
+# --- Continuous "still working" beds ---------------------------------------------------
+#
+# A repeating tick says "still ticking". A bed says "still working" — it fills the wait
+# rather than marking it. Kish's note: "more continuous, almost like an elevator music
+# type thing".
+#
+# These have to loop perfectly. A discontinuity at the seam is a click, and a click every
+# few seconds is worse than the tick we are replacing. The trick is to quantise every
+# frequency so a whole number of cycles fits the loop exactly, which makes the last sample
+# continuous with the first by construction rather than by luck.
+#
+# They also have to survive being in the room while the wake recogniser is listening, so
+# everything here is low, quiet, and deliberately unlike speech: no consonants, no sudden
+# onsets, nothing in the 1-3 kHz band where vowels carry.
+
+def snap(freq, loop_dur):
+    """Nearest frequency with a whole number of cycles in `loop_dur`."""
+    return round(freq * loop_dur) / loop_dur
+
+
+def bed(loop_dur, partials, amp=0.11, tremolo_hz=None, tremolo_depth=0.35):
+    """Sum of sines, each snapped to loop cleanly. `partials` is [(freq, weight)]."""
+    n = int(loop_dur * RATE)
+    snapped = [(snap(f, loop_dur), w) for f, w in partials]
+    trem = snap(tremolo_hz, loop_dur) if tremolo_hz else None
+    total_w = sum(w for _, w in snapped)
+    out = []
+    for i in range(n):
+        t = i / RATE
+        v = sum(w * math.sin(2 * math.pi * f * t) for f, w in snapped) / total_w
+        if trem:
+            v *= 1.0 - tremolo_depth * (0.5 - 0.5 * math.cos(2 * math.pi * trem * t))
+        out.append(v * amp)
+    return out
+
+
+# 1. Warm pad — a soft major-ninth chord, breathing slowly. Closest to "elevator music"
+#    without a melody to get stuck in your head.
+BED_PAD = bed(4.0, [(146.83, 1.0), (220.00, 0.7), (293.66, 0.5), (329.63, 0.35), (440.00, 0.2)],
+              amp=0.12, tremolo_hz=0.25, tremolo_depth=0.30)
+
+# --- A small additive synth, so the hold-music family can actually be explored ----------
+#
+# Everything wraps around the loop: a note struck near the end continues into the start of
+# the next pass, and chord crossfades wrap too. Without that, "seamless" only means "no
+# click", and you would still hear the music restart.
+
+def notes_bed(loop_dur, events, partials=((1.0, 1.0),), amp=0.10,
+              attack=0.02, decay=1.4, under=None, under_amp=0.05):
+    """`events` is [(start_seconds, freq, velocity)]. Notes wrap past the loop end.
+
+    `partials` shapes the timbre as [(harmonic_ratio, weight)] — a single entry is a pure
+    sine, adding an octave and a fifth gets you toward an electric piano.
+    """
+    n = int(loop_dur * RATE)
+    out = [0.0] * n
+    for start, freq, vel in events:
+        fs = [(snap(freq * r, loop_dur), w) for r, w in partials]
+        total_w = sum(w for _, w in fs)
+        length = int(min(decay * 4, loop_dur) * RATE)
+        s0 = int(start * RATE)
+        for i in range(length):
+            t = i / RATE
+            env = min(1.0, t / attack) * math.exp(-t / decay)
+            if env < 1e-4:
+                break
+            pos = (s0 + i) % n                      # wrap, so the loop point is inaudible
+            gt = pos / RATE
+            v = sum(w * math.sin(2 * math.pi * f * gt) for f, w in fs) / total_w
+            out[pos] += v * amp * vel * env
+    if under:
+        d = bed(loop_dur, under, amp=under_amp)
+        out = [a + b for a, b in zip(out, d)]
+    return out
+
+
+def chord_bed(loop_dur, chords, amp=0.11, cross=1.2):
+    """Sustained chords crossfading into each other, wrapping at the loop point."""
+    n = int(loop_dur * RATE)
+    out = [0.0] * n
+    span = loop_dur / len(chords)
+    for idx, freqs in enumerate(chords):
+        fs = [snap(f, loop_dur) for f in freqs]
+        start = idx * span
+        for i in range(n):
+            gt = i / RATE
+            # Distance into this chord's window, wrapped.
+            d = (gt - start) % loop_dur
+            if d > span + cross:
+                continue
+            # Fade in over `cross`, hold, fade out over `cross`.
+            if d < cross:
+                env = d / cross
+            elif d < span:
+                env = 1.0
+            else:
+                env = max(0.0, 1.0 - (d - span) / cross)
+            if env <= 0:
+                continue
+            v = sum(math.sin(2 * math.pi * f * gt) for f in fs) / len(fs)
+            out[i] += v * amp * env
+    return out
+
+
+# Timbres
+SINE = ((1.0, 1.0),)
+RHODES = ((1.0, 1.0), (2.0, 0.35), (3.0, 0.12), (4.01, 0.06))   # soft electric piano
+BOX = ((1.0, 1.0), (2.0, 0.5), (5.4, 0.18))                     # music box / celeste
+
+C, E, F, G, A, Bb, D5 = 261.63, 329.63, 349.23, 392.00, 440.00, 466.16, 587.33
+
+# 2. Hold music — gentle four-note arpeggio over a drone. The literal reading.
+BED_HOLD = notes_bed(4.0,
+                     [(0.0, C, 1.0), (1.0, E, 0.9), (2.0, G, 0.85), (3.0, E, 0.8)],
+                     partials=SINE, amp=0.11, attack=0.25, decay=1.1,
+                     under=[(130.81, 1.0), (196.00, 0.4)], under_amp=0.045)
+
+# 3. Low drone — the most ignorable.
+BED_DRONE = bed(4.0, [(110.00, 1.0), (110.75, 0.9), (220.00, 0.25)], amp=0.10)
+
+# 4. Rhodes — soft electric piano, two chords. The most straightforwardly "hold music".
+BED_RHODES = notes_bed(8.0,
+                       [(0.0, C, 1.0), (0.0, E, .8), (0.0, G, .7), (0.55, D5, .5),
+                        (4.0, A/2, 1.0), (4.0, C, .8), (4.0, E, .7), (4.55, G, .5)],
+                       partials=RHODES, amp=0.085, attack=0.015, decay=1.9,
+                       under=[(130.81, 1.0), (164.81, 0.5)], under_amp=0.035)
+
+# 5. Music box — high and sparse over a warm pad. Prettiest, most distinctive.
+BED_BOX = notes_bed(8.0,
+                    [(0.0, G*2, .9), (0.9, C*2, .8), (1.8, E*2, .75), (2.7, D5*2, .6),
+                     (4.0, F*2, .85), (4.9, A*2, .8), (5.8, C*2, .7), (6.7, G*2, .55)],
+                    partials=BOX, amp=0.055, attack=0.006, decay=1.0,
+                    under=[(130.81, 1.0), (196.00, .55), (261.63, .3)], under_amp=0.05)
+
+# 6. Two-chord pad — the warm pad with somewhere to go. Movement without a melody.
+BED_MOVE = chord_bed(8.0,
+                     [[146.83, 220.00, 293.66, 349.23],    # Dm add9-ish
+                      [174.61, 261.63, 329.63, 392.00]],   # F major
+                     amp=0.115, cross=1.6)
+
+# 7. Deep pad — lower and richer, the least "device" of them all.
+BED_DEEP = bed(6.0, [(98.00, 1.0), (146.83, .8), (196.00, .55), (246.94, .3), (293.66, .18)],
+               amp=0.125, tremolo_hz=0.166, tremolo_depth=0.22)
+
+BEDS = {
+    "bed-pad": (BED_PAD, "Warm pad",
+                "A soft major-ninth chord breathing on a 4s cycle. Elevator music without "
+                "a melody you could get stuck on."),
+    "bed-move": (BED_MOVE, "Two-chord pad",
+                 "The warm pad with somewhere to go: two chords crossfading over 8s. "
+                 "Movement without a tune, which wears better on a long wait."),
+    "bed-deep": (BED_DEEP, "Deep pad",
+                 "Lower and richer, breathing slowly on a 6s cycle. The least 'device' of "
+                 "them all and the easiest to talk over."),
+    "bed-rhodes": (BED_RHODES, "Rhodes",
+                   "Soft electric piano, two chords over 8s. The most straightforwardly "
+                   "hold music, in the good way."),
+    "bed-box": (BED_BOX, "Music box",
+                "High sparse bells over a warm pad, 8s. The prettiest and the most "
+                "distinctive — also the most likely to get noticed."),
+    "bed-hold": (BED_HOLD, "Simple arpeggio",
+                 "Four notes over a drone, 4s. The plainest musical option."),
+    "bed-drone": (BED_DRONE, "Low drone",
+                  "Two detuned low tones beating slowly. Not music; reads as 'on'."),
+}
+
 CUE_MEANING = {
     "listening": ("Heard you", "Wake fired. The turn has started and it is recording."),
     "captured":  ("Got the shot", "A photo landed. This is the one that tells you to stop holding still."),
@@ -133,6 +300,22 @@ SET_NOTES = {
 }
 
 
+def seam_check(samples, name):
+    """A seam is audible only as a jump larger than the signal's own motion.
+
+    For a sine snapped to whole cycles the wrap step *is* an ordinary step, so comparing
+    against the maximum with `<=` fails on floating-point equality. Compare against a high
+    percentile with a little headroom instead.
+    """
+    diffs = sorted(abs(samples[i + 1] - samples[i]) for i in range(len(samples) - 1))
+    typical = diffs[int(len(diffs) * 0.9999)]
+    wrap = abs(samples[0] - samples[-1])
+    ok = wrap <= typical * 1.5
+    print(f"  {name:12} wrap {wrap:.6f} vs typical step {typical:.6f}  "
+          f"{'seamless' if ok else 'CLICKS'}")
+    return ok
+
+
 def main():
     rows = []
     for set_id, cues in SETS.items():
@@ -140,6 +323,12 @@ def main():
             name, dur = write(f"{set_id}-{cue}", samples)
             rows.append((set_id, cue, name, dur))
             print(f"{name:28} {dur:6.0f} ms")
+
+    print("\ncontinuous beds (loop seamlessly, played on repeat while thinking):")
+    for bed_id, (samples, _, _) in BEDS.items():
+        name, dur = write(bed_id, samples)
+        print(f"{name:28} {dur:6.0f} ms")
+        seam_check(samples, bed_id)
 
     order = ["listening", "captured", "thinking", "cancelled", "error", "asleep", "awake"]
     html = ["""<title>Glassbridge earcons</title>
@@ -208,9 +397,33 @@ thing here.
             )
         html.append("</table>")
 
+    html.append('<h2>Still working<span class="tag">continuous</span></h2>')
+    html.append('<p class="setnote">Replaces the repeating tick. These loop seamlessly and '
+                'play under the whole wait, fading in after 1.2s and out when the reply '
+                'starts. Quiet, low, and deliberately unlike speech, so they do not fight '
+                'the wake recogniser that is still listening underneath. Let one run for a '
+                'few seconds to hear the loop point, or rather to not hear it.</p>')
+    html.append("<table><tr><th>Option</th><th>Character</th><th></th></tr>")
+    for bed_id, (samples, label, blurb) in BEDS.items():
+        dur = len(samples) / RATE
+        html.append(
+            f'<tr><td><div class="cue">{label}</div><div class="why">{blurb}</div></td>'
+            f'<td style="color:var(--dim);font-size:13px">{bed_id}</td>'
+            f'<td><button onclick="loop(\'{bed_id}.wav\',this)">▶ Loop</button>'
+            f'<span class="ms">{dur:.0f}s cycle</span></td></tr>'
+        )
+    html.append("</table>")
+
     html.append("""
 <script>
  function p(f){ const a=new Audio(f); a.play(); }
+ let looping=null, loopBtn=null;
+ function loop(f,btn){
+   if(looping){ looping.pause(); looping=null;
+     if(loopBtn){loopBtn.textContent='▶ Loop'; const b=loopBtn; loopBtn=null; if(b===btn) return;} }
+   looping=new Audio(f); looping.loop=true; looping.play();
+   loopBtn=btn; btn.textContent='■ Stop';
+ }
  function seq(set){
    const steps=[['listening',0],['captured',700],['thinking',1500],['thinking',3100],['cancelled',4600]];
    steps.forEach(([cue,delay])=>setTimeout(()=>p(set+'-'+cue+'.wav'),delay));
