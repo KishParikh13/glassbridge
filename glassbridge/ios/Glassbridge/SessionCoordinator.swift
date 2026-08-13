@@ -272,6 +272,21 @@ final class SessionCoordinator: ObservableObject {
         await runTurn(presetImage: nil)
     }
 
+    /// One tap that proves capture → agent → voice actually works together. Four separate
+    /// green status dots do not tell you the chain holds, and this app fails when things
+    /// line up wrong rather than when one part is missing.
+    ///
+    /// `MockSetup` is `#if DEBUG` only (it imports MWDATMockDevice), so release cannot use
+    /// the stub image. It runs a real capture with a fixed prompt instead, which exercises
+    /// more of the chain anyway.
+    func runSelfTest() async {
+        #if DEBUG
+        await runTestAsk()
+        #else
+        await askTypedPrompt("Describe what you can see in one short sentence.")
+        #endif
+    }
+
     func askTypedPrompt(_ prompt: String, presetImage: Data? = nil) async {
         let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }

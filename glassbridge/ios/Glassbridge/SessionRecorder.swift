@@ -47,6 +47,10 @@ final class SessionRecorder: ObservableObject {
     @Published private(set) var isRecording = false
     /// Kept in memory for the diagnostics panel. The JSON on disk is the real artifact.
     @Published private(set) var lastRecording: Recording?
+    /// Newest first, for the Recent list in Settings. The app records every turn and
+    /// never showed any of it, which made "is this working" a question you could only
+    /// answer by trying it again.
+    @Published private(set) var recent: [Recording] = []
 
     private var current: Recording?
     private var startedAtUptime: TimeInterval = 0
@@ -135,8 +139,20 @@ final class SessionRecorder: ObservableObject {
         do {
             try encoder.encode(recording).write(to: url)
             gblog("[REC] wrote \(url.lastPathComponent) (\(recording.events.count) events)")
+            loadRecent()
         } catch {
             gblog("[REC] write failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Read the newest recordings back off disk. Cheap: these are a few KB each and the
+    /// list is capped.
+    func loadRecent(limit: Int = 6) {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        recent = Self.saved().prefix(limit).compactMap { url in
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? decoder.decode(Recording.self, from: data)
         }
     }
 
