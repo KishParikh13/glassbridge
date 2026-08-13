@@ -56,8 +56,13 @@ final class GlassesController: ObservableObject {
     @Published var contextCaptureEnabled = false
     @Published private(set) var contextFrameCount = 0
 
-    /// True when the glasses camera stream is live (the capture source upgrades to glasses).
+    /// True while the glasses camera stream is actively being used.
     var isStreaming: Bool { connectionState == .streaming }
+
+    /// True when glasses are connected enough for an on-demand camera action.
+    var canCaptureFromGlasses: Bool {
+        connectionState == .connected || connectionState == .streaming || connectionState == .needsCameraPermission
+    }
 
     // MARK: - Internal state used to derive connectionState
     private var registrationState: RegistrationState = .unavailable
@@ -65,6 +70,8 @@ final class GlassesController: ObservableObject {
     private var cameraPermissionDenied = false
     private var firmwareUpdateMessage: String?
     private var isStartingStream = false
+    private var hasDeviceWaitTimedOut = false
+    private var deviceWaitTimeoutTask: Task<Void, Never>?
 
     private var sessionManager: GlassesSessionManager?
     private var stream: MWDATCamera.Stream?
@@ -174,22 +181,54 @@ final class GlassesController: ObservableObject {
 
         switch registrationState {
         case .unavailable:
+            cancelDeviceWaitTimeout()
             connectionState = .usingPhone
         case .available:
+            cancelDeviceWaitTimeout()
             connectionState = .readyToConnect
         case .registering:
+            cancelDeviceWaitTimeout()
             connectionState = .registering
         case .registered:
             if !(sessionManager?.hasActiveDevice ?? false) {
-                connectionState = .connecting
+                beginDeviceWaitTimeout()
+                if hasDeviceWaitTimedOut {
+                    connectionState = .problem("Make sure glasses are on and open, then try again.")
+                } else {
+                    connectionState = .connecting
+                }
             } else if cameraPermissionDenied {
+                cancelDeviceWaitTimeout()
                 connectionState = .needsCameraPermission
             } else {
+                cancelDeviceWaitTimeout()
                 connectionState = .connected
             }
         @unknown default:
+            cancelDeviceWaitTimeout()
             connectionState = .usingPhone
         }
+    }
+
+    private func beginDeviceWaitTimeout() {
+        guard deviceWaitTimeoutTask == nil, !hasDeviceWaitTimedOut else { return }
+        deviceWaitTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self else { return }
+                self.hasDeviceWaitTimedOut = true
+                self.deviceWaitTimeoutTask = nil
+                self.log("devices: wait timed out")
+                self.updateConnectionState()
+            }
+        }
+    }
+
+    private func cancelDeviceWaitTimeout() {
+        deviceWaitTimeoutTask?.cancel()
+        deviceWaitTimeoutTask = nil
+        hasDeviceWaitTimedOut = false
     }
 
     // MARK: - Connect / disconnect
@@ -197,6 +236,7 @@ final class GlassesController: ObservableObject {
     func connect() {
         guard GlassbridgeApp.wearablesConfigured, registrationState != .registering else { return }
         lastError = nil
+        cancelDeviceWaitTimeout()
         Task { [weak self] in
             guard let self else { return }
             self.log("connect: startRegistration()")
@@ -268,9 +308,8 @@ final class GlassesController: ObservableObject {
 
     // MARK: - Streaming
 
-    /// Start the glasses camera stream: request camera permission if needed, get a
-    /// started session, then add + start the stream. Idempotent and safe to call
-    /// from the Live view, Setup "Test", or before a capture.
+    /// Start the glasses camera stream for an explicit capture/recording action.
+    /// The UI should not keep this running just because glasses are connected.
     func startStreaming() async {
         guard GlassbridgeApp.wearablesConfigured, let sessionManager else { return }
         guard streamState != .streaming, !isStartingStream else { return }
@@ -386,6 +425,11 @@ final class GlassesController: ObservableObject {
         measuredFPS = 0
     }
 
+    func stopStreaming() {
+        teardownStream()
+        updateConnectionState()
+    }
+
     /// Apply new camera quality/frame rate. Rebuilds the stream if one is live.
     func applyStreamSettings(quality: Quality, frameRate: Int) {
         self.quality = quality
@@ -460,21 +504,20 @@ final class GlassesController: ObservableObject {
 
     // MARK: - Capture
 
-    /// Capture one JPEG from the glasses, starting the stream first if needed.
+    /// Capture one JPEG from the glasses, starting and stopping the stream on demand.
     func capturePhoto(timeout: TimeInterval = 6.0) async throws -> Data {
-        if streamState != .streaming { await startStreaming() }
+        let startedForPhoto = streamState != .streaming
+        if startedForPhoto { await startStreaming() }
+        defer {
+            if startedForPhoto && !isRecording {
+                stopStreaming()
+            }
+        }
         guard let stream else {
             throw NSError(domain: "GlassesController", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Glasses aren't streaming. Connect your glasses first."])
         }
-        let waitStart = Date()
-        while streamState != .streaming {
-            if Date().timeIntervalSince(waitStart) > timeout {
-                throw NSError(domain: "GlassesController", code: 2,
-                              userInfo: [NSLocalizedDescriptionKey: lastError ?? "Glasses didn't start streaming."])
-            }
-            try await Task.sleep(nanoseconds: 100_000_000)
-        }
+        try await waitUntilStreaming(timeout: timeout)
 
         let t0 = Date()
         let data: Data = try await withCheckedThrowingContinuation { cont in
@@ -499,7 +542,20 @@ final class GlassesController: ObservableObject {
         return data
     }
 
-    func startVideoRecording() throws {
+    func testCameraOnce() async {
+        do {
+            _ = try await capturePhoto()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func startVideoRecording() async throws {
+        if streamState != .streaming { await startStreaming() }
+        if streamState != .streaming {
+            try await waitUntilStreaming(timeout: 6.0)
+        }
         guard stream != nil, streamState == .streaming else {
             throw NSError(domain: "GlassesController", code: 21,
                           userInfo: [NSLocalizedDescriptionKey: "Glasses aren't streaming. Connect your glasses first."])
@@ -514,7 +570,19 @@ final class GlassesController: ObservableObject {
             throw NSError(domain: "GlassesController", code: 23,
                           userInfo: [NSLocalizedDescriptionKey: "No video was recorded."])
         }
+        stopStreaming()
         return url
+    }
+
+    private func waitUntilStreaming(timeout: TimeInterval) async throws {
+        let waitStart = Date()
+        while streamState != .streaming {
+            if Date().timeIntervalSince(waitStart) > timeout {
+                throw NSError(domain: "GlassesController", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: lastError ?? "Glasses didn't start streaming."])
+            }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
     }
 
     private func deliverPhoto(_ result: Result<Data, Error>) {

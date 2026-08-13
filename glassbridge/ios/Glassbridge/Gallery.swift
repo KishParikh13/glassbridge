@@ -10,8 +10,8 @@ struct MediaThumbnail: View {
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             thumbnail
-                .frame(height: 104)
                 .frame(maxWidth: .infinity)
+                .aspectRatio(1, contentMode: .fill)
                 .clipped()
                 .clipShape(RoundedRectangle(cornerRadius: 10))
 

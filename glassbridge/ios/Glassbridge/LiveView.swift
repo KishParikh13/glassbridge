@@ -206,19 +206,6 @@ struct LiveView: View {
             .buttonStyle(.plain)
 
             Spacer()
-
-            Button {
-                showSetup = true
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.headline.weight(.bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 42, height: 42)
-                    .background(.black.opacity(0.35), in: Circle())
-                    .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Settings")
         }
     }
 

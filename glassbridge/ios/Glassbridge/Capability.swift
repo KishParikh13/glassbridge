@@ -51,9 +51,14 @@ struct Capability: Identifiable {
         speechGranted: Bool,
         backendReachable: Bool
     ) -> [Capability] {
-        let glassesLive = connection.isGlassesLive
-        let captureSource = glassesLive ? "Ray-Ban glasses" : "iPhone"
-        let micSource = glassesLive ? "Glasses mic" : "iPhone mic"
+        let glassesReady: Bool = {
+            switch connection {
+            case .connected, .streaming, .needsCameraPermission: return true
+            default: return false
+            }
+        }()
+        let captureSource = glassesReady ? "Ray-Ban glasses" : "iPhone"
+        let micSource = glassesReady ? "Glasses mic" : "iPhone mic"
 
         let voiceStatus: Status = {
             if !backendReachable { return .unavailable }
@@ -71,20 +76,8 @@ struct Capability: Identifiable {
             Capability(
                 icon: "camera.fill",
                 name: "Photo & Video",
-                status: cameraGranted || glassesLive ? .ready : .needsPermission,
-                source: captureSource + (glassesLive ? "" : " (upgrades to glasses)")
-            ),
-            Capability(
-                icon: "dot.radiowaves.left.and.right",
-                name: "Live preview",
-                status: glassesLive ? .ready : .glassesOnly,
-                source: "Ray-Ban glasses stream"
-            ),
-            Capability(
-                icon: "clock.arrow.circlepath",
-                name: "Rolling context",
-                status: glassesLive ? .ready : .glassesOnly,
-                source: "Ray-Ban glasses stream"
+                status: cameraGranted || glassesReady ? .ready : .needsPermission,
+                source: captureSource + (glassesReady ? "" : " (upgrades to glasses)")
             ),
             Capability(
                 icon: "mic.fill",
