@@ -129,15 +129,43 @@ These are the *minimum* pre-conditions before `Wearables.shared.devicesStream()`
 
 After `setPreferredInput(...)` to a BT route, the actual current route doesn't update synchronously. PortWorld polls every 100 ms for up to 2 s. We do the same. Don't trust `availableInputs` alone — confirm via `session.currentRoute.inputs.contains { $0.portType == .bluetoothXxx }`.
 
-### 10. Latency budget
+### 10. Latency budget — and why the backend moved to the Mac mini
 
-For a 5-second user utterance, what we measured on a 2024 MacBook + M2 Pro:
-- Whisper distil-large-v3 CPU/int8: **~5–8 s** transcription
-- Claude Sonnet 4.6 vision: **~3–5 s** to full reply
-- ElevenLabs `eleven_flash_v2_5` streaming MP3: **~0.7 s** time-to-first-chunk, ~15 chunks total in ~2 s
-- Network + multipart upload: ~200 ms on LAN
+The old numbers here claimed ~5–8 s for Whisper. Measured properly on the same 3 s clip,
+it was **12.0 s** on the MacBook's CPU, so the documented "4–13 s" round trip was
+optimistic. Real was closer to 16 s.
 
-Total perceived "tap-to-reply-audio": **4–13 s**. Whisper dominates; the rest is small. If you want sub-3 s, replace Whisper with a streaming STT (Deepgram, AssemblyAI) or run Whisper on GPU.
+`faster-whisper` uses CTranslate2, which has **no Metal backend**. On Apple Silicon it is
+CPU-only, and there is no CUDA to fall back to — "run Whisper on GPU" on a Mac means MLX
+or whisper.cpp, not a device flag.
+
+Same audio, same sentence, both transcribed correctly:
+
+| | Model | Time |
+|---|---|---|
+| MacBook CPU, faster-whisper | distil-large-v3 | **12.0 s** |
+| M4 mini, MLX | large-v3-turbo | **1.55 s** |
+
+MLX is ~8x faster *and* runs the full model rather than the distilled approximation.
+
+**Measured end to end** (`POST /ask`, real audio + real image, over Tailscale):
+
+```
+total 5.49 s  =  stt 1.60  +  llm 3.08  +  tts/transport ~0.8
+```
+
+So the backend now runs on the always-on M4 mini and the phone reaches it over
+**Tailscale**, not the LAN. That fixes three things at once: the GPU is on that machine,
+it is always up, and a Tailscale address works from any network. A LAN address required
+phone and Mac on the same Wi-Fi, which fails outright on networks with client isolation
+(most coffee shops) and goes stale whenever DHCP moves the Mac.
+
+Two gotchas:
+- `mlx_whisper` shells out to **ffmpeg** to decode audio. Unnecessary here: the app
+  records 16 kHz mono 16-bit already, so the stdlib `wave` module reads it directly. See
+  `MlxTranscriber._load_wav`.
+- The iPhone needs **Tailscale installed and signed in**. Without it every request times
+  out silently, which looks identical to a denied Local Network permission.
 
 ### 11. Backend `0.0.0.0` vs `127.0.0.1`
 
