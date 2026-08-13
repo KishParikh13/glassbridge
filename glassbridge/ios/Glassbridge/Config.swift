@@ -14,9 +14,6 @@ enum AppConfig {
         #endif
     }()
 
-    /// Seconds of audio recorded per ASK.
-    static let recordSeconds: Double = 5.0
-
     /// Stable per-launch session id so the backend can keep multi-turn memory.
     static let sessionId: String = UUID().uuidString
 }

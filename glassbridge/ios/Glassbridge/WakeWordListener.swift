@@ -2,13 +2,14 @@ import Foundation
 import Speech
 import AVFoundation
 
-/// Continuous on-device speech recognition that fires `onWake` when it hears a
-/// trigger phrase (default "hey glass"). Lets you start an ASK hands-free with
-/// the phone pocketed. Uses Apple's Speech framework — no extra keys/deps.
+/// Continuous on-device speech recognition that fires `onWake` when it hears a trigger
+/// phrase (default "hey glass"). Lets you start an ask hands-free with the phone pocketed.
+/// Uses Apple's Speech framework, so no extra keys or dependencies.
 ///
-/// Coordination: the recognizer taps the mic via AVAudioEngine, which conflicts
-/// with the ASK recorder. The owner must `pause()` before running an ASK and
-/// `resume()` afterward.
+/// It no longer owns an `AVAudioEngine` or the audio session. Buffers come from
+/// `MicrophoneHub`, and `AudioSessionController` owns the session, so this can keep
+/// listening while a recording or a reply is in flight instead of having to be torn down
+/// around every ask.
 @MainActor
 final class WakeWordListener: ObservableObject {
     enum State: String {
@@ -22,11 +23,11 @@ final class WakeWordListener: ObservableObject {
 
     private let phrase: String
     private let recognizer = SFSpeechRecognizer()
-    private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
+    private var sinkID: UUID?
     private var enabled = false   // user wants it on
-    private var paused = false    // temporarily suspended for an ASK
+    private var paused = false    // temporarily suspended
 
     init(phrase: String = "hey glass") {
         self.phrase = phrase.lowercased()
@@ -54,32 +55,26 @@ final class WakeWordListener: ObservableObject {
         state = .off
     }
 
-    /// Suspend listening (caller is about to record an ASK).
+    /// Suspend listening. Nothing about the audio route changes, so resuming is cheap.
     func pause() {
         guard enabled else { return }
         paused = true
         teardown()
     }
 
-    /// Resume listening after an ASK completes.
     func resume() {
         guard enabled else { return }
         paused = false
         beginTask()
     }
 
-    // MARK: – Internals
+    // MARK: - Internals
 
     private func beginTask() {
         guard enabled, !paused else { return }
         guard let recognizer, recognizer.isAvailable else { state = .unavailable; return }
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(
-                .playAndRecord, mode: .measurement,
-                options: [.allowBluetoothHFP, .duckOthers, .defaultToSpeaker]
-            )
-            try session.setActive(true, options: [])
+            try AudioSessionController.shared.activate()
 
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.shouldReportPartialResults = true
@@ -88,18 +83,14 @@ final class WakeWordListener: ObservableObject {
             }
             self.request = request
 
-            let input = engine.inputNode
-            let format = input.outputFormat(forBus: 0)
-            input.removeTap(onBus: 0)
-            // Capture the request locally so the audio thread never touches `self`.
-            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            // Capture the request rather than self, so the audio thread never touches an
+            // actor-isolated object.
+            sinkID = try MicrophoneHub.shared.addSink { buffer, _ in
                 request.append(buffer)
             }
-            engine.prepare()
-            try engine.start()
 
             self.task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-                // Extract Sendable primitives off the callback thread, then hop.
+                // Pull out Sendable primitives on the callback thread, then hop.
                 let text = result?.bestTranscription.formattedString.lowercased()
                 let isFinal = result?.isFinal ?? false
                 let hadError = error != nil
@@ -112,8 +103,8 @@ final class WakeWordListener: ObservableObject {
                             return
                         }
                     }
-                    // Speech tasks cap out (~1 min) and end on silence; restart to
-                    // keep listening unless we've been paused/stopped.
+                    // Speech tasks cap out (~1 min) and end on silence; restart to keep
+                    // listening unless we have been paused or stopped.
                     if hadError || isFinal, self.enabled, !self.paused {
                         self.restart()
                     }
@@ -127,10 +118,11 @@ final class WakeWordListener: ObservableObject {
     }
 
     private func fireWake() {
-        // Suspend ourselves so the same utterance can't retrigger and the mic is
-        // free for the ASK recorder. The owner calls resume() when the ASK ends.
+        // Suspend so the same utterance cannot retrigger. The owner calls resume() when
+        // the ask ends.
         paused = true
         teardown()
+        print("[WAKE] detected \"\(phrase)\"")
         onWake?()
     }
 
@@ -139,12 +131,16 @@ final class WakeWordListener: ObservableObject {
         beginTask()
     }
 
+    /// Detaches from the shared mic. It deliberately does not deactivate the audio
+    /// session: doing that here used to cut off whatever else was playing.
     private func teardown() {
+        if let sinkID {
+            MicrophoneHub.shared.removeSink(sinkID)
+            self.sinkID = nil
+        }
         task?.cancel()
         task = nil
         request?.endAudio()
         request = nil
-        engine.inputNode.removeTap(onBus: 0)
-        if engine.isRunning { engine.stop() }
     }
 }

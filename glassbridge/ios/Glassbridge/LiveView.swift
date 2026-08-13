@@ -1,83 +1,225 @@
 import SwiftUI
 import UIKit
+import AVKit
+import PhotosUI
+import UniformTypeIdentifiers
 
-/// Home screen: shows the live view (glasses stream or iPhone), with ASK as the
-/// primary action plus direct Photo/Record. The capture source is always shown so
-/// it's clear whether you're on glasses or the phone.
+/// Full-screen capture surface. The viewfinder stays visually present, but the
+/// actual camera stream only starts for explicit photo, record, or Ask actions.
 struct LiveView: View {
     @ObservedObject var coordinator: SessionCoordinator
     @ObservedObject var glasses: GlassesController
-    @State private var selectedMedia: CapturedMedia?
+
+    @State private var showSetup = false
+    @State private var showResponseSheet = false
+    @State private var prompt = ""
+    @State private var followUpPrompt = ""
+    @State private var stagedMedia: CapturedMedia?
+    @State private var photoPickerItem: PhotosPickerItem?
+    @State private var shutterTask: Task<Void, Never>?
+    @State private var shutterPressed = false
+    @State private var holdRecordingStarted = false
+    @State private var recordProgress: Double = 0
+    @State private var recordTimerTask: Task<Void, Never>?
+    @State private var recordAutoStopped = false
+    @FocusState private var promptFocused: Bool
+
+    private let maxRecordSeconds: Double = 10
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 18) {
-                    sourceChip
-                    previewCard
-                    askSection
-                    captureControls
-                    replyArea
-                    recentStrip
-                }
-                .padding(.horizontal, 18)
-                .padding(.bottom, 24)
-            }
-            .navigationTitle("Glassbridge")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        coordinator.setWakeWord(!coordinator.wakeWordEnabled)
-                    } label: {
-                        Image(systemName: coordinator.wakeWordEnabled ? "mic.fill" : "mic")
-                            .foregroundStyle(coordinator.wakeWordEnabled ? .red : .secondary)
-                    }
-                    .accessibilityLabel("Hands-free wake word")
+            ZStack {
+                cameraStage
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    topChrome
+                        .padding(.horizontal, 18)
+                        .padding(.top, 10)
+
+                    Spacer()
+
+                    bottomControls
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 18)
                 }
             }
-            .sheet(item: $selectedMedia) { media in
-                MediaDetailView(media: media) { item in
-                    selectedMedia = nil
-                    Task { await coordinator.askAboutMedia(item) }
-                }
+            .navigationBarHidden(true)
+            .sheet(isPresented: $showSetup) {
+                SetupView(coordinator: coordinator, glasses: glasses, wake: coordinator.wake)
+            }
+            .sheet(isPresented: $showResponseSheet) {
+                ChatResponseSheet(
+                    coordinator: coordinator,
+                    prompt: $followUpPrompt,
+                    onSend: sendFollowUp
+                )
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
             }
             .task { await coordinator.checkBackend() }
             .onAppear {
-                // Bring up the glasses stream if they're connected, so preview +
-                // glasses capture are ready without an extra tap.
-                if case .connected = glasses.connectionState {
-                    Task { await glasses.startStreaming() }
-                }
+                if !coordinator.hasCompletedOnboarding { showSetup = true }
+            }
+            .onChange(of: coordinator.hasCompletedOnboarding) { _, completed in
+                showSetup = !completed
+            }
+            .onChange(of: coordinator.reply) { _, newValue in
+                if !newValue.isEmpty { showResponseSheet = true }
+            }
+            .onChange(of: coordinator.phase) { _, phase in
+                if case .error = phase { showResponseSheet = true }
+            }
+            .onChange(of: coordinator.capturedMedia.first?.id) { _, _ in
+                stagedMedia = coordinator.capturedMedia.first
+            }
+            .onChange(of: photoPickerItem) { _, item in
+                guard let item else { return }
+                Task { await handlePickedItem(item) }
             }
         }
     }
 
-    // MARK: – Source chip
+    // MARK: - Stage
 
-    private var sourceChip: some View {
-        Button {
-            coordinator.selectedTab = .setup
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: chipIcon)
-                Text(glasses.connectionState.shortLabel)
-                    .fontWeight(.medium)
-                Spacer()
-                if !glasses.connectionState.isGlassesLive {
-                    Text("Setup")
-                        .font(.caption.weight(.semibold))
-                    Image(systemName: "chevron.right").font(.caption2)
+    private var cameraStage: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.05, green: 0.07, blue: 0.08),
+                    Color(red: 0.08, green: 0.13, blue: 0.14),
+                    Color(red: 0.01, green: 0.02, blue: 0.025),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Circle()
+                .fill(Color.cyan.opacity(0.18))
+                .frame(width: 340, height: 340)
+                .blur(radius: 90)
+                .offset(x: -150, y: -240)
+
+            Circle()
+                .fill(Color.orange.opacity(0.14))
+                .frame(width: 280, height: 280)
+                .blur(radius: 80)
+                .offset(x: 160, y: 170)
+
+            if let stagedMedia {
+                CapturedPreview(
+                    media: stagedMedia,
+                    onCollapse: { self.stagedMedia = nil },
+                    onDelete: {
+                        coordinator.removeCapturedMedia(stagedMedia)
+                        self.stagedMedia = nil
+                    }
+                )
+                .padding(.horizontal, 22)
+                .padding(.bottom, 118)
+                .transition(.scale(scale: 0.94).combined(with: .opacity))
+            } else if (coordinator.showLiveCamera || coordinator.isRecordingVideo), let preview = glasses.previewImage {
+                Image(uiImage: preview)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    .ignoresSafeArea()
+            } else {
+                VStack(spacing: 14) {
+                    Image(systemName: glasses.canCaptureFromGlasses ? "eyeglasses" : "camera.viewfinder")
+                        .font(.system(size: 58, weight: .light))
+                        .foregroundStyle(.white.opacity(0.82))
+                    Text(stageTitle)
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(stageSubtitle)
+                        .font(.footnote)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.white.opacity(0.68))
+                        .padding(.horizontal, 34)
                 }
+                .padding(.bottom, 100)
             }
-            .font(.subheadline)
-            .foregroundStyle(chipColor)
-            .padding(.vertical, 10)
-            .padding(.horizontal, 14)
-            .frame(maxWidth: .infinity)
-            .background(chipColor.opacity(0.12), in: Capsule())
+
+            VStack {
+                Spacer()
+                LinearGradient(
+                    colors: [.clear, .black.opacity(0.72)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 270)
+            }
         }
-        .buttonStyle(.plain)
+    }
+
+    private var stageTitle: String {
+        if coordinator.isRecordingVideo { return "Recording" }
+        switch coordinator.phase {
+        case .listening: return "Listening"
+        case .thinking: return "Asking Claude"
+        case .speaking: return "Response ready"
+        case .error: return "Needs attention"
+        case .idle: return glasses.canCaptureFromGlasses ? "Glasses ready" : "iPhone camera ready"
+        }
+    }
+
+    private var stageSubtitle: String {
+        if coordinator.isRecordingVideo { return "Release the shutter to stop recording." }
+        if let error = coordinator.captureError, !error.isEmpty { return error }
+        switch coordinator.phase {
+        case .idle:
+            return "Tap for photo, hold for video, or dictate a prompt and send."
+        case .listening:
+            return "Ask your question, then pause. It stops when you stop."
+        case .thinking:
+            return "Camera wakes only for this request."
+        case .speaking:
+            return "The reply is in the sheet."
+        case .error(let message):
+            return message
+        }
+    }
+
+    // MARK: - Top Chrome
+
+    private var topChrome: some View {
+        HStack(spacing: 10) {
+            Button {
+                showSetup = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: chipIcon)
+                    Text(glasses.connectionState.shortLabel)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 12)
+                .background(.black.opacity(0.35), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Button {
+                showSetup = true
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 42, height: 42)
+                    .background(.black.opacity(0.35), in: Circle())
+                    .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Settings")
+        }
     }
 
     private var chipIcon: String {
@@ -90,158 +232,509 @@ struct LiveView: View {
         }
     }
 
-    private var chipColor: Color {
-        switch glasses.connectionState {
-        case .streaming: return .green
-        case .connected, .readyToConnect, .registering, .connecting: return .blue
-        case .usingPhone: return .secondary
-        case .needsDeviceUpdate, .needsCameraPermission, .problem, .metaAINotInstalled: return .orange
+    // MARK: - Bottom Controls
+
+    private var bottomControls: some View {
+        VStack(spacing: 14) {
+            if !phaseStatus.isEmpty {
+                Text(phaseStatus)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+
+            HStack(alignment: .center) {
+                liveCameraToggle
+                Spacer()
+                shutterButton
+            }
+            .padding(.horizontal, 4)
+            .padding(.bottom, 2)
+
+            composer
+            .padding(10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: composerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: composerRadius, style: .continuous)
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+            )
         }
     }
 
-    // MARK: – Preview
+    private var composerRadius: CGFloat {
+        coordinator.capturedMedia.isEmpty ? 34 : 28
+    }
 
-    private var previewCard: some View {
-        VStack(spacing: 8) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14).fill(Color.black)
-                if glasses.isStreaming, let img = glasses.previewImage {
-                    Image(uiImage: img).resizable().scaledToFit()
-                } else {
-                    VStack(spacing: 8) {
-                        Image(systemName: glasses.isStreaming ? "dot.radiowaves.left.and.right" : "camera.viewfinder")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                        Text(previewHint)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 20)
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !coordinator.capturedMedia.isEmpty {
+                attachmentStrip
+            }
+            TextField("", text: $prompt, axis: .vertical)
+                .textFieldStyle(.plain)
+                .submitLabel(.send)
+                .lineLimit(1...5)
+                .focused($promptFocused)
+                .foregroundStyle(.white)
+                .tint(.white)
+                .onSubmit(sendPrompt)
+                .overlay(alignment: .topLeading) {
+                    if prompt.isEmpty {
+                        Text("Ask about what you see")
+                            .foregroundStyle(.white.opacity(0.5))
+                            .allowsHitTesting(false)
+                    }
+                }
+            HStack(spacing: 10) {
+                uploadMenu
+                modelMenu
+                Spacer()
+                Button(action: sendPrompt) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 30))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(canSendPrompt ? .white : .white.opacity(0.3))
+                }
+                .disabled(!canSendPrompt)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+    }
+
+    private var modelMenu: some View {
+        Menu {
+            ForEach(SessionCoordinator.ClaudeModel.allCases) { model in
+                Button {
+                    coordinator.selectedModel = model
+                } label: {
+                    if coordinator.selectedModel == model {
+                        Label(model.menuLabel, systemImage: "checkmark")
+                    } else {
+                        Text(model.menuLabel)
                     }
                 }
             }
-            .frame(height: 200)
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-
-            // Glasses-only live toggles. Disabled (with explanation) on iPhone.
-            HStack(spacing: 16) {
-                Toggle("Live preview", isOn: $glasses.previewEnabled)
-                    .toggleStyle(.switch)
-                    .disabled(!glasses.isStreaming)
-                Toggle("Rolling context", isOn: $glasses.contextCaptureEnabled)
-                    .toggleStyle(.switch)
-                    .disabled(!glasses.isStreaming)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "sparkles")
+                Text(coordinator.selectedModel.label)
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
             }
-            .font(.caption)
-            if glasses.isStreaming {
-                HStack {
-                    Text(String(format: "%.0f fps", glasses.measuredFPS))
-                    if !glasses.lastFrameSize.isEmpty { Text("· \(glasses.lastFrameSize)") }
-                    if glasses.contextCaptureEnabled { Text("· \(glasses.contextFrameCount) ctx") }
-                    Spacer()
-                }
-                .font(.system(.caption2, design: .monospaced))
-                .foregroundStyle(.tertiary)
-            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.white.opacity(0.86))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(.black.opacity(0.24), in: Capsule())
         }
     }
 
-    private var previewHint: String {
-        if glasses.isStreaming { return "Waiting for frames…" }
-        if glasses.connectionState == .usingPhone {
-            return "Using the iPhone camera. Point it at something and tap ASK."
+    // Icon-only attach (direct PhotosPicker — nesting in a Menu fails to present).
+    private var uploadMenu: some View {
+        PhotosPicker(selection: $photoPickerItem, matching: .any(of: [.images, .videos])) {
+            Image(systemName: "photo.badge.plus")
+                .font(.system(size: 22))
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(width: 34, height: 34)
         }
-        return "Glasses live preview appears here once connected. Tap the status above to finish setup."
+        .accessibilityLabel("Attach photo or video")
     }
 
-    // MARK: – ASK + capture
-
-    private var askSection: some View {
-        VStack(spacing: 8) {
-            Button {
-                Task { await coordinator.askPressed() }
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(askColor)
-                        .frame(width: 132, height: 132)
-                        .shadow(color: askColor.opacity(0.4), radius: 12, y: 4)
-                    Text("ASK")
-                        .font(.system(size: 38, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(coordinator.capturedMedia) { media in
+                    AttachmentChip(
+                        media: media,
+                        onDelete: { coordinator.removeCapturedMedia(media) },
+                        onCollapse: { stagedMedia = nil }
+                    )
                 }
             }
-            .buttonStyle(.plain)
-            .disabled(askDisabled)
-            .opacity(askDisabled ? 0.85 : 1)
-            Text(phaseTitle)
-                .font(.subheadline.weight(.semibold))
-            if !phaseSubtitle.isEmpty {
-                Text(phaseSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-            }
+            .padding(.top, 2)
         }
     }
 
-    private var captureControls: some View {
-        HStack(spacing: 48) {
-            smallCapture(title: "Photo", systemImage: "camera.fill", tint: .blue,
-                         disabled: coordinator.isCapturingPhoto || coordinator.isRecordingVideo,
-                         busy: coordinator.isCapturingPhoto) {
-                Task { await coordinator.takePhotoDirect() }
+    private var liveCameraToggle: some View {
+        Button {
+            coordinator.setShowLiveCamera(!coordinator.showLiveCamera)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: coordinator.showLiveCamera ? "video.fill" : "video.slash.fill")
+                Text("Show live camera")
             }
-            smallCapture(title: coordinator.isRecordingVideo ? "Stop" : "Record",
-                         systemImage: coordinator.isRecordingVideo ? "stop.fill" : "video.fill",
-                         tint: .red,
-                         disabled: coordinator.isCapturingPhoto,
-                         busy: false) {
-                Task { await coordinator.toggleVideoRecording() }
-            }
-        }
-        .overlay(alignment: .bottom) {
-            if let err = coordinator.captureError, !err.isEmpty {
-                Text(err).font(.caption2).foregroundStyle(.red).padding(.top, 60)
-            }
-        }
-    }
-
-    private func smallCapture(title: String, systemImage: String, tint: Color,
-                              disabled: Bool, busy: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 6) {
-                ZStack {
-                    Circle().fill(tint.opacity(disabled ? 0.4 : 1)).frame(width: 60, height: 60)
-                    if busy { ProgressView().tint(.white) }
-                    else { Image(systemName: systemImage).font(.system(size: 24, weight: .bold)).foregroundStyle(.white) }
-                }
-                Text(title).font(.caption2.weight(.semibold))
-            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(coordinator.showLiveCamera ? .white : .white.opacity(0.7))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(
+                coordinator.showLiveCamera ? Color.white.opacity(0.20) : Color.black.opacity(0.32),
+                in: Capsule()
+            )
+            .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .disabled(disabled)
+        .accessibilityLabel("Show live camera")
     }
 
-    // MARK: – Reply
+    private var shutterButton: some View {
+        ZStack {
+            // Snapchat-style elapsed-time ring while recording (fills over maxRecordSeconds).
+            if coordinator.isRecordingVideo {
+                Circle()
+                    .trim(from: 0, to: recordProgress)
+                    .stroke(Color.red, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                    .frame(width: 88, height: 88)
+                    .animation(.linear(duration: 0.1), value: recordProgress)
+            }
+            Circle()
+                .fill(coordinator.isRecordingVideo ? Color.red : Color.white)
+                .frame(width: shutterPressed ? 68 : 74, height: shutterPressed ? 68 : 74)
+                .animation(.spring(response: 0.22, dampingFraction: 0.72), value: shutterPressed)
+            Circle()
+                .strokeBorder(coordinator.isRecordingVideo ? Color.white : Color.black.opacity(0.18), lineWidth: 4)
+                .frame(width: 58, height: 58)
+            if coordinator.isCapturingPhoto {
+                ProgressView()
+                    .tint(.black)
+            } else if coordinator.isRecordingVideo {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(.white)
+                    .frame(width: 24, height: 24)
+            }
+        }
+        .frame(width: 88, height: 88)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in beginShutterPressIfNeeded() }
+                .onEnded { _ in endShutterPress() }
+        )
+        .accessibilityLabel("Capture")
+        .accessibilityHint("Tap for photo. Hold to record video (max \(Int(maxRecordSeconds))s).")
+    }
 
-    @ViewBuilder
-    private var replyArea: some View {
-        if !coordinator.transcript.isEmpty || !coordinator.reply.isEmpty {
-            VStack(alignment: .leading, spacing: 12) {
-                if !coordinator.transcript.isEmpty {
-                    bubble(label: "YOU", text: coordinator.transcript, accent: .blue)
+    private var canSendPrompt: Bool {
+        (!prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !coordinator.capturedMedia.isEmpty) && !isAsking
+    }
+
+    private var isAsking: Bool {
+        switch coordinator.phase {
+        case .listening, .thinking, .speaking: return true
+        default: return false
+        }
+    }
+
+    private var phaseStatus: String {
+        switch coordinator.phase {
+        case .idle: return coordinator.isRecordingVideo ? "Recording video" : ""
+        case .listening: return "Listening..."
+        case .thinking: return "Sending to Claude..."
+        case .speaking: return "Claude replied"
+        case .error(let message): return message
+        }
+    }
+
+    private func beginShutterPressIfNeeded() {
+        guard !shutterPressed, !coordinator.isCapturingPhoto else { return }
+        shutterPressed = true
+        holdRecordingStarted = false
+        recordAutoStopped = false
+        shutterTask = Task {
+            try? await Task.sleep(nanoseconds: 420_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                holdRecordingStarted = true
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            }
+            await coordinator.beginVideoRecording()
+            startRecordTimer()
+        }
+    }
+
+    private func endShutterPress() {
+        shutterTask?.cancel()
+        shutterTask = nil
+        // The 10s timer already stopped the recording — just consume the release.
+        if recordAutoStopped {
+            recordAutoStopped = false
+            shutterPressed = false
+            holdRecordingStarted = false
+            return
+        }
+        let shouldStopRecording = holdRecordingStarted
+        shutterPressed = false
+        holdRecordingStarted = false
+
+        Task {
+            if shouldStopRecording {
+                recordTimerTask?.cancel()
+                recordTimerTask = nil
+                recordProgress = 0
+                await coordinator.endVideoRecording()
+            } else {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                await coordinator.takePhotoDirect()
+            }
+        }
+    }
+
+    /// Drives the shutter ring and enforces the max recording length.
+    private func startRecordTimer() {
+        recordProgress = 0
+        recordTimerTask?.cancel()
+        recordTimerTask = Task {
+            let start = Date()
+            while !Task.isCancelled {
+                let elapsed = Date().timeIntervalSince(start)
+                recordProgress = min(elapsed / maxRecordSeconds, 1)
+                if elapsed >= maxRecordSeconds {
+                    recordAutoStopped = true
+                    await coordinator.endVideoRecording()
+                    recordProgress = 0
+                    shutterPressed = false
+                    holdRecordingStarted = false
+                    break
                 }
-                if !coordinator.reply.isEmpty {
-                    bubble(label: "CLAUDE", text: coordinator.reply, accent: .purple, markdown: true)
+                try? await Task.sleep(nanoseconds: 80_000_000)
+            }
+            recordTimerTask = nil
+        }
+    }
+
+    private func sendPrompt() {
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let attachment = coordinator.capturedMedia.first
+        guard !text.isEmpty || attachment != nil else { return }
+        prompt = ""
+        followUpPrompt = ""
+        promptFocused = false
+        showResponseSheet = true
+        Task { await coordinator.askTypedPrompt(text, media: attachment) }
+    }
+
+    private func sendFollowUp() {
+        let text = followUpPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        followUpPrompt = ""
+        Task { await coordinator.askTypedPrompt(text) }
+    }
+
+    private func handlePickedItem(_ item: PhotosPickerItem) async {
+        defer { photoPickerItem = nil }
+        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
+        if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("picked-\(UUID().uuidString).mov")
+            do {
+                try data.write(to: url)
+                coordinator.attachUploadedVideo(url)
+            } catch {
+                coordinator.captureError = "Couldn't attach video: \(error.localizedDescription)"
+            }
+        } else {
+            coordinator.attachUploadedPhoto(data)
+        }
+    }
+
+}
+
+private struct CapturedPreview: View {
+    let media: CapturedMedia
+    let onCollapse: () -> Void
+    let onDelete: () -> Void
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            preview
+                .frame(maxWidth: .infinity)
+                .aspectRatio(3 / 4, contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 34, style: .continuous)
+                        .strokeBorder(.white.opacity(0.22), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.36), radius: 24, y: 14)
+
+            HStack(spacing: 10) {
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash.fill")
+                        .frame(width: 42, height: 42)
+                        .background(.black.opacity(0.48), in: Circle())
                 }
-                if !coordinator.latencySummary.isEmpty {
-                    Text(coordinator.latencySummary)
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                Button(action: onCollapse) {
+                    Image(systemName: "checkmark")
+                        .font(.headline.weight(.bold))
+                        .frame(width: 42, height: 42)
+                        .background(.white, in: Circle())
+                        .foregroundStyle(.black)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+        }
+        .task(id: media.id) {
+            if !media.isVideo {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                onCollapse()
+            }
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+        }
+    }
+
+    @ViewBuilder
+    private var preview: some View {
+        switch media.kind {
+        case .photo(let data):
+            if let image = UIImage(data: data) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+            } else {
+                Color.black.overlay(Text("Couldn't load photo").foregroundStyle(.white.opacity(0.7)))
+            }
+        case .video(let url):
+            VideoAutoPreview(url: url, player: $player, onFinished: onCollapse)
+        }
+    }
+}
+
+private struct VideoAutoPreview: View {
+    let url: URL
+    @Binding var player: AVPlayer?
+    let onFinished: () -> Void
+
+    var body: some View {
+        VideoPlayer(player: player)
+            .background(Color.black)
+            .onAppear {
+                let nextPlayer = AVPlayer(url: url)
+                player = nextPlayer
+                NotificationCenter.default.addObserver(
+                    forName: .AVPlayerItemDidPlayToEndTime,
+                    object: nextPlayer.currentItem,
+                    queue: .main
+                ) { _ in
+                    onFinished()
+                }
+                nextPlayer.play()
+            }
+    }
+}
+
+private struct AttachmentChip: View {
+    let media: CapturedMedia
+    let onDelete: () -> Void
+    let onCollapse: () -> Void
+
+    var body: some View {
+        thumbnail
+            .frame(width: 62, height: 62)
+            .clipped()
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+            )
+            .overlay(alignment: .center) {
+                if media.isVideo {
+                    Image(systemName: "play.fill")
+                        .font(.caption)
+                        .foregroundStyle(.white)
+                        .shadow(radius: 2)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                Button(action: onDelete) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 18, height: 18)
+                        .background(.black.opacity(0.6), in: Circle())
+                        .overlay(Circle().strokeBorder(.white.opacity(0.35), lineWidth: 0.5))
+                }
+                .padding(4)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .onTapGesture(perform: onCollapse)
+    }
+
+    @ViewBuilder
+    private var thumbnail: some View {
+        switch media.kind {
+        case .photo(let data):
+            if let image = UIImage(data: data) {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                Color.black
+            }
+        case .video(let url):
+            VideoThumbnail(url: url)
+        }
+    }
+}
+
+private struct ChatResponseSheet: View {
+    @ObservedObject var coordinator: SessionCoordinator
+    @Binding var prompt: String
+    let onSend: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if !coordinator.transcript.isEmpty {
+                            bubble(label: "YOU", text: coordinator.transcript, accent: .blue)
+                        }
+                        if !coordinator.reply.isEmpty {
+                            bubble(label: "CLAUDE", text: coordinator.reply, accent: .green, markdown: true)
+                        }
+                        if case .error(let message) = coordinator.phase {
+                            bubble(label: "ERROR", text: message, accent: .red)
+                        }
+                        if !coordinator.latencySummary.isEmpty {
+                            Text(coordinator.latencySummary)
+                                .font(.system(.caption2, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                HStack(spacing: 10) {
+                    TextField("Continue the chat", text: $prompt, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...4)
+                        .focused($focused)
+                        .submitLabel(.send)
+                        .onSubmit(onSend)
+                    Button(action: onSend) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title2)
+                    }
+                    .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(12)
+                .background(Color.secondary.opacity(0.10), in: RoundedRectangle(cornerRadius: 20))
+                .padding([.horizontal, .bottom], 16)
+            }
+            .navigationTitle("Claude")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Close") { dismiss() }
+                }
+            }
         }
     }
 
@@ -255,78 +748,15 @@ struct LiveView: View {
                    let attributed = try? AttributedString(
                     markdown: text,
                     options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-                    Text(attributed).font(.body)
+                    Text(attributed)
                 } else {
-                    Text(text).font(.body)
+                    Text(text)
                 }
             }
-            .foregroundStyle(.primary)
+            .font(.body)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(accent.opacity(0.08))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(accent.opacity(0.18), lineWidth: 1))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    // MARK: – Recent captures
-
-    @ViewBuilder
-    private var recentStrip: some View {
-        if !coordinator.capturedMedia.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Text("Recent").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Clear", role: .destructive) { coordinator.clearCapturedMedia() }
-                        .font(.caption2)
-                }
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(coordinator.capturedMedia) { media in
-                            MediaThumbnail(media: media)
-                                .frame(width: 104)
-                                .onTapGesture { selectedMedia = media }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // MARK: – Phase derivations
-
-    private var askColor: Color {
-        switch coordinator.phase {
-        case .idle: return .blue
-        case .listening: return .red
-        case .thinking: return .orange
-        case .speaking: return .green
-        case .error: return .gray
-        }
-    }
-    private var askDisabled: Bool {
-        switch coordinator.phase {
-        case .listening, .thinking, .speaking: return true
-        default: return false
-        }
-    }
-    private var phaseTitle: String {
-        switch coordinator.phase {
-        case .idle: return "Ready"
-        case .listening: return "Listening…"
-        case .thinking: return "Thinking…"
-        case .speaking: return "Speaking…"
-        case .error: return "Something went wrong"
-        }
-    }
-    private var phaseSubtitle: String {
-        switch coordinator.phase {
-        case .idle: return ""
-        case .listening: return "Speak for up to 5 seconds"
-        case .thinking: return "Sending to Claude with what the camera sees"
-        case .speaking: return "Playing Claude's reply"
-        case .error(let msg): return msg
-        }
+        .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
