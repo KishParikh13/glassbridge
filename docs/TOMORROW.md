@@ -1,69 +1,70 @@
-# Queued for you — 2026-08-13
+# Pick up here
 
-Everything is committed, pushed, and installed. Backend running on the mini.
+Last session: 2026-08-12 evening → 08-13 midday. 35 commits, all pushed, `main` clean.
 
-## 1. KishOS has its own wake phrase  (~2 min)
+## State of things
 
-Say **"hey claude, what should I focus on today"**.
+Working on real hardware, verified: the hands-free loop (~5.2s), the spoken vocabulary
+(`look`, `never mind`, `stop`, `go to sleep`), barge-in, the 15s open conversation, and two
+agents on separate wake phrases. Six of seven hardware validation tests pass; the seventh
+(earcon distinguishability) was never formally run, only used.
 
-Verified working overnight, same question to each:
-  hey glass   -> "I don't know who you are."
-  hey claude  -> "you're Kish. operator not IC, taste is your edge... right now the
-                  honest focus is close to home: your dad's treatment, Aarthi's visa."
+**Backend lives on the Mac mini** and the phone reaches it over Tailscale. Both were up at
+`100.96.61.83:8082` when this was written. To restart:
 
-Settings -> Agents lists both phrases. An eye icon marks the one that can see.
-Adding a third is an edit to agents.json + a backend restart. No rebuild, no Swift.
-Contract in docs/AGENTS.md.
+```bash
+ssh kishparikh@kishs-mac-mini-1 'cd ~/Code/glassbridge && ./run.sh'
+```
 
-## 2. The one measurement I need  (~1 min, matters most)
+**The phone was disconnected at the end**, so the last three fixes (wake-phrase label, the
+auto-test image, the sheet detent) are in git and on the simulator but **not on the
+device**. Reconnect and:
 
-Wake it, ask **"explain how a bicycle stays upright"**, then stay COMPLETELY SILENT
-through the whole reply.
+```bash
+cd ios && xcodebuild -project Glassbridge.xcodeproj -scheme Glassbridge \
+  -destination 'id=00008150-001A65C41A12401C' -derivedDataPath build-dev \
+  -allowProvisioningUpdates build
+xcrun devicectl device install app --device F279F78D-DD9F-5C73-84A3-A649633D07CB \
+  build-dev/Build/Products/Debug-iphoneos/Glassbridge.app
+```
 
-Then tell me. I pull one line:
+## Next, in the order I would do it
 
-  [OPEN] closed: window elapsed - peak 0.041 - echo 0.006 - floor 0.005 - trigger 0.020
+**1. Record the demo.** Everything in [`DEMO.md`](DEMO.md) works. Five shots, ~2 minutes.
+The one-clip pick is shot 4: the same question to both agents. Shot 3 is two takes and is
+the one an always-on audience will care about most.
 
-`echo` is the loudest the mic heard while the reply was playing. Near the floor means
-echo cancellation works and barge-in can be aggressive. Close to `peak` means the reply
-is leaking into the mic, and no energy threshold will ever separate you from it.
+**2. Build the annotated timeline.** Scoped but not built. It reads a turn's JSON from
+`Documents/recordings/` and renders waveform, earcon markers, phase bands, and a lane
+showing a command that was *heard and deliberately ignored*. Shot 3b produces exactly that
+record. It is the only artifact that makes an invisible decision visible, and the portfolio
+session wants it as the signature visual.
 
-This settles the question that has been open since the first hardware session.
+**3. Decide what "sharing" means.** The repo is public and clean of secrets. Nobody can
+install the app while Meta's toolkit is in Developer Preview, so the realistic options are
+the repo as a reference implementation and the case study. If you want someone else to be
+able to *run* it: backend URL as a setting rather than a constant, a shared token on
+`/ask`, and a cold-start README pass. Maybe half a day.
 
-## 3. Barge-in, second attempt  (~2 min)
+## Loose ends
 
-Talk over a reply. Just talk, no wake phrase.
+- **`/ask` has no auth.** Anyone on the tailnet can spend your Anthropic and ElevenLabs
+  credits. Fine today, not fine the moment you add someone.
+- **`ios/README.md` is stale.** The main README no longer links it. Update or delete.
+- The glasses camera is the flakiest part: ~6s when it works, and Meta's permission flow is
+  broken underneath. Do not build a demo beat that depends on it firing first try.
+- The open-conversation window is fixed at 15s. OpenVision makes it configurable 15s–2min.
+- KishOS is `acceptsImages: false`, so `look` does nothing on that agent. Its gateway has an
+  `/upload` endpoint if you want images routed there.
+- Untested in a noisy room. Every audio measurement we have is from a quiet one, and the
+  wake word's sensitivity now adapts to the noise floor.
 
-Last attempt failed and the research explains why: your voice over HFP arrives ~15 dB
-quieter than close-mic, so my 0.030 threshold sat near the PEAK of glasses speech rather
-than its body. It now tracks the room's noise floor and triggers 12 dB above it, so
-sensitivity follows the environment instead of a number I guessed wrong twice.
+## Where things are
 
-## 4. Earcons to pick from  (~5 min)
-
-    open docs/earcons/index.html
-
-Three complete sets, "Play a whole turn" on each. Listen on the glasses if you can.
-  a-glass    pure sines. neutral, iOS-ish.
-  b-warm     same intervals, softer timbre. a chime not a beep.
-  c-tactile  struck bells + pitch glides. SHIPPING — chosen.
-
-Tell me a set, or mix cues across sets, and I will wire it.
-
-## Reading, if you want it
-
-  docs/RESEARCH.md   prior art, what Meta actually does, industry numbers vs ours
-  docs/AGENTS.md     how to plug in another agent
-
-Headline from the research: Meta ships "respond without Hey Meta" ON by default, which
-is the open-conversation window you asked for independently. And their real trick is not
-hearing you, it is knowing when you meant them: they filter "speech not intended for the
-glasses". That is intent classification, not energy, and it is the known ceiling of our
-approach.
-
-## Still open
-
-- KishOS answers in ~10.5s vs ~5.3s for glass. Agentic loop; the thinking earcon covers it.
-- Follow-up window is fixed at 15s. OpenVision makes it configurable 15s-2min.
-- KishOS is acceptsImages:false, so "look" does nothing there. Its gateway has an /upload
-  endpoint if you want images routed to it.
+| | |
+|---|---|
+| Sound sets to audition | `docs/earcons/index.html` (shipping: tactile + two-chord pad) |
+| Screenshots | `docs/screenshots/`, captured against the live backend |
+| Case study handoff | `/tmp/glassbridge-case-study-handoff.md` (copy it somewhere durable) |
+| Settings redesign trail | `~/.gstack/projects/KishParikh13-glassbridge/refine/20260812-194317-setup-settings/` |
+| Simulator screenshots | `SIMCTL_CHILD_GB_SKIP_ONBOARDING=1 SIMCTL_CHILD_GB_SCREEN=agent xcrun simctl launch booted com.kish.glassbridge` |
