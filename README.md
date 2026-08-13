@@ -1,140 +1,180 @@
 # Glassbridge
 
-Voice + vision loop: tap one button, look at something, speak. Claude replies
-in your ear a few seconds later.
+Talk to an AI through Ray-Ban Meta glasses, hands-free, with no screen.
+
+Say **"hey glass"** and ask a question. It answers in your ear in about five seconds. Say
+**"look"** and it takes a photo first. Talk over the reply and it stops and listens. Say
+**"go to sleep"** and it stays asleep, even after a restart.
+
+The interesting part is not the model call. It is that the whole interface is sound and
+timing: there is nothing to look at, so every state has to be audible, and every mistake
+has to be cheap to take back.
 
 ```
-Glasses ─BT─┐
-            ├─▶ iPhone ─Wi-Fi─▶ MacBook (FastAPI)
-iPhone cam ─┘                         ├── Whisper STT (faster-whisper, CPU)
-                                      ├── Claude Sonnet 4.6 vision
-                                      └── ElevenLabs streaming TTS
+                      "hey glass"            "hey claude"
+                           │                      │
+  Ray-Ban Meta ──BT/HFP──▶ iPhone ──Tailscale──▶ Mac mini
+   mic + speaker           on-device              ├── MLX Whisper       1.6s
+                           wake word              ├── agent registry    ├─ Claude + web search
+                           + earcons              └── ElevenLabs TTS    └─ or your own agent
 ```
 
-## Current status
+## What works
 
-- **iPhone-camera + iPhone-mic path works end-to-end.** Tap ASK, see + hear
-  Claude respond about what your phone is pointed at. 4–13 second round-trip.
-- **Ray-Ban glasses path is fully wired but blocked** on Meta's DAT SDK
-  dev-mode permission flow (a known Meta-side issue — see [docs/LEARNINGS.md](docs/LEARNINGS.md)).
-  When that unblocks, the app switches to glasses automatically with no code
-  change.
+Verified on real hardware. See [`docs/HARDWARE_VALIDATION.md`](docs/HARDWARE_VALIDATION.md)
+for the test script and results.
 
-## Run it (≈10 minutes the first time)
+- **Hands-free voice loop** over the glasses' mic and speaker. ~5.2s round trip.
+- **A spoken vocabulary**, not just a wake word: `look` attaches a photo mid-sentence,
+  `never mind` drops the turn, `stop` cuts a reply short, `go to sleep` switches it off.
+- **Barge-in.** Talk over an answer and it stops. Echo cancellation measured at essentially
+  zero leakage, which is what makes this safe to be sensitive.
+- **An open conversation.** For 15 seconds after a reply you can just talk, no wake phrase,
+  same thread.
+- **Pluggable agents.** Each gets its own wake phrase. Adding one is a config file and a
+  restart, no app rebuild. See [`docs/AGENTS.md`](docs/AGENTS.md).
 
-### 1. Start the backend
+## What does not work
+
+- **The glasses camera is unreliable.** Meta's DAT permission flow is broken on their side
+  and closed with no fix (`facebook/meta-wearables-dat-ios` Discussion #101). Captures
+  currently take ~6s and sometimes never arrive. The **audio** path is unaffected, which is
+  why the product is viable at all. Details in [`docs/LEARNINGS.md`](docs/LEARNINGS.md) §2.
+- **You cannot install this the normal way.** Meta's Wearables Device Access Toolkit is in
+  Developer Preview, so App Store and TestFlight distribution are not available to anyone.
+  Building from source with your own Apple developer account is the only path.
+- Effects are hardcoded to "speak". No triggers other than the wake word (no cron,
+  geofence, calendar). See [`docs/ARCHITECTURE_V2.md`](docs/ARCHITECTURE_V2.md) for the
+  model the rest of this is heading toward.
+
+## Run it
+
+Roughly 15 minutes the first time. You need an iPhone, an Apple developer account, and
+your own API keys. Ray-Ban Meta glasses are optional: without them it uses the phone's mic
+and camera and everything else behaves the same.
+
+### 1. Backend
 
 ```bash
-cd glassbridge   # repo root
 cp .env.example .env
-# Edit .env, paste:
-#   ANTHROPIC_API_KEY=sk-ant-...
-#   ELEVENLABS_API_KEY=sk_...
+# ANTHROPIC_API_KEY=sk-ant-...
+# ELEVENLABS_API_KEY=sk_...
 ./run.sh
 ```
 
-First run creates a `.venv` and pulls dependencies (~2 min). Then it
-downloads the `distil-large-v3` Whisper model (~600 MB, one time). After
-that you'll see:
+First run creates a `.venv` and installs dependencies. Speech-to-text defaults to whatever
+is available:
 
-```
-[run] starting on http://192.168.1.42:8082
-[run] iOS BACKEND_URL = http://192.168.1.42:8082
-INFO  Loading Whisper model=distil-large-v3 device=cpu compute=int8
-INFO  Whisper model ready.
-INFO  Glassbridge ready on 0.0.0.0:8082
-```
+| | |
+|---|---|
+| Apple Silicon with `mlx-whisper` installed | GPU, ~1.6s. `pip install mlx-whisper` |
+| `GROQ_API_KEY` set | hosted, under a second |
+| neither | local CPU Whisper, ~12s, and a ~1.5 GB model download |
 
-Keep this terminal open. Smoke-test from any other terminal:
+The last one works but is slow enough to change how the product feels. On a Mac, install
+`mlx-whisper`.
 
-```bash
-curl http://192.168.1.42:8082/healthz
-# {"status":"ok"}
-```
-
-### 2. Run the iOS app
-
-See [`ios/README.md`](ios/README.md). The TL;DR:
+`run.sh` prints the URL to use. Smoke-test it:
 
 ```bash
-brew install xcodegen          # one-time
+curl http://<that-host>:8082/healthz     # {"status":"ok"}
+curl http://<that-host>:8082/agents      # who you can talk to
+```
+
+### 2. iOS app
+
+```bash
+brew install xcodegen        # one time
 cd ios
-# Edit Glassbridge/Config.swift → paste the http://… URL printed above
+# Edit Glassbridge/Config.swift → the URL run.sh printed
 xcodegen generate
-open Glassbridge.xcodeproj
-# In Xcode: set your team, build to your iPhone (⌘R), tap "Pair / register glasses"
+open Glassbridge.xcodeproj   # set your team, ⌘R to your iPhone
 ```
 
-Then in iOS Settings → Bluetooth → your glasses, turn **Use for Calls** ON
-so the glasses appear as a Bluetooth HFP audio device to the phone.
+Grant microphone, camera, and speech recognition. Then Settings → Hands-free → wake word
+on.
 
-### 3. Tap ASK
+**If the backend is not on the same Wi-Fi**, put both devices on a Tailscale tailnet and
+use the Tailscale address. That is what this repo does, and it is more reliable than a LAN
+address: it survives changing networks, and many public networks isolate clients from each
+other so a LAN address simply cannot work. Note that Tailscale addresses are CGNAT, which
+iOS does **not** treat as local networking, so cleartext HTTP needs an ATS exception. This
+project sets one.
 
-Look at something, speak. Done.
+### 3. Glasses (optional)
 
-## What you get
+Pair them in the Meta AI app, then check iOS Settings → Bluetooth. They need to be an audio
+route, not just paired to Meta AI. On iOS 26 the old "Use for Calls" toggle is gone; look
+for the Device Type picker.
 
-- **`/healthz`** — liveness probe.
-- **`POST /ask`** — multipart `audio` (wav) + `image` (jpeg) + `session_id` (form
-  field). Returns `audio/mpeg` (streaming MP3) with debug headers:
-  - `X-Glassbridge-Transcript` (URL-encoded)
-  - `X-Glassbridge-Reply` (URL-encoded)
-  - `X-Glassbridge-Lang`
-  - `X-Glassbridge-Latency-Stt`, `X-Glassbridge-Latency-Llm`
-- **Multi-turn memory**: backend keeps the last 3 turns per `session_id`. The
-  iOS app generates one per launch.
+When it is working, Settings → Status → Ray-Ban glasses shows *Connected*, and the audio
+route reads `BluetoothHFP` for both input and output.
 
-## What this does NOT do (yet)
+## Agents
 
-- Tailscale / remote backend — local LAN only
-- Wake word — manual button tap to ASK
-- OpenClaw tool calling, MCP, agent presets
-- Continuous video context — single frame per ASK
-- WebSocket streaming — single POST per turn
-
-See [`docs/USE_CASES.md`](docs/USE_CASES.md) for ideas that would actually
-benefit from those, and [`docs/ARCHITECTURE_V2.md`](docs/ARCHITECTURE_V2.md)
-for what a programmable-workflow version of Glassbridge looks like.
-
-## Project layout
+Two ship by default:
 
 ```
-glassbridge/
-├── backend/
-│   ├── main.py         – FastAPI app, /healthz, /ask
-│   ├── config.py       – env-driven Settings
-│   ├── stt.py          – faster-whisper wrapper
-│   ├── llm.py          – Anthropic vision wrapper
-│   ├── tts.py          – ElevenLabs streaming HTTP
-│   └── sessions.py     – in-memory rolling history per session_id
-├── ios/
-│   ├── project.yml     – xcodegen spec
-│   └── Glassbridge/    – Swift sources (see ios/README.md)
-├── docs/
-│   ├── USE_CASES.md         – 25 glasses-specific workflows
-│   ├── ARCHITECTURE_V2.md   – the programmable-workflow vision
-│   └── LEARNINGS.md         – hard-won technical notes (DAT 0.7, MMA, audio, latency, …)
-├── samples/            – test inputs for curl smoke tests
-├── requirements.txt
-├── .env.example
-└── run.sh
+"hey glass"   → Claude with eyes and web search. Knows what you are looking at.
+"hey claude"  → whatever you point it at. Here, a personal assistant with its own
+                corpus, tools, and memory.
 ```
 
-## Before you contribute
+Adding a third is an entry in `agents.json` and a backend restart. The app asks
+`GET /agents` at launch and arms a trigger phrase for each, so there is no app change.
+Anything that accepts a JSON POST and answers with newline-delimited JSON works. Full
+contract in [`docs/AGENTS.md`](docs/AGENTS.md).
 
-Read [`docs/LEARNINGS.md`](docs/LEARNINGS.md) — it captures the ~10 things that
-will save you hours: the actual DAT SDK 0.7 API (which differs from Meta's
-own public docs), the Apple Developer Team ID trap, Meta MMA's broken
-permission flow, the AVAudioSession HFP route activation poll, the Anthropic
-5 MB image cap, and more.
+## API
 
-## Files we read while building this
+- `GET /healthz` — liveness.
+- `GET /agents` — the agents and their wake phrases.
+- `POST /ask` — multipart: `audio` (wav, required), `image` (jpeg, optional),
+  `session_id`, `agent`, `model`, `text_override`. Streams back `audio/mpeg` with
+  `X-Glassbridge-Transcript`, `-Reply`, `-Agent`, `-Latency-Stt`, `-Latency-Llm` (all
+  URL-encoded).
 
-- `reference/PortWorld/` — gave us the AVAudioSession HFP incantation
-  ([`IOS/PortWorld/Audio/AudioCollectionManager.swift`](../reference/PortWorld/IOS/PortWorld/Audio/AudioCollectionManager.swift)).
-- `reference/meta-wearables-dat-ios/` — DAT SDK 0.7 swiftinterface (the API
-  shape changed meaningfully from PortWorld's 0.5-era reference: `Stream`
-  not `StreamSession`, `deviceSession.addStream(config:)` not a free init).
-- ElevenLabs streaming TTS: `https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream`
-- Anthropic vision: standard `messages.create` with an `image` content block
-  (base64 inline).
+The image is optional on purpose. Most questions are language, not vision, and a photo
+nobody asked for costs latency and tokens.
+
+## Docs
+
+| | |
+|---|---|
+| [`AGENTS.md`](docs/AGENTS.md) | How to plug in a different assistant |
+| [`HARDWARE_VALIDATION.md`](docs/HARDWARE_VALIDATION.md) | The test script for real glasses, plus results |
+| [`RESEARCH.md`](docs/RESEARCH.md) | Prior art, what Meta's own always-on mode does, industry numbers vs ours |
+| [`LEARNINGS.md`](docs/LEARNINGS.md) | The things that cost hours. Read before contributing |
+| [`ARCHITECTURE_V2.md`](docs/ARCHITECTURE_V2.md) | Trigger → Inputs → Policy → Effects, where this is going |
+| [`USE_CASES.md`](docs/USE_CASES.md) | 25 workflows that need glasses rather than a phone |
+| [`DEMO.md`](docs/DEMO.md) | What to record, and what each shot proves |
+| [`earcons/index.html`](docs/earcons) | Audition the sound sets. `python3 docs/earcons/generate.py` regenerates them |
+
+## Layout
+
+```
+backend/
+  main.py          FastAPI: /healthz, /agents, /ask
+  agents/          the pluggable agent layer (base, claude, gateway, registry)
+  stt.py           MLX / Groq / faster-whisper, chosen at startup
+  llm.py           Anthropic vision + tools
+  tts.py           ElevenLabs streaming
+  tests/           agent-layer tests, no network or keys needed
+ios/Glassbridge/
+  WakeWordListener  continuous recognition, phase-scoped command grammar
+  MicrophoneHub     one mic tap, many subscribers
+  AudioSessionController  the single owner of AVAudioSession
+  VoiceActivity     adaptive-threshold barge-in detection
+  Earcons           generated tones; the whole audible vocabulary
+  SessionRecorder   per-turn JSON event log
+agents.example.json  copy to agents.json to add assistants
+```
+
+## Notes
+
+Run the backend tests with `python -m unittest discover -s backend/tests -t .`
+
+Before changing anything audio-related, read [`docs/LEARNINGS.md`](docs/LEARNINGS.md). The
+short version: one object owns the audio session, one object owns the microphone, and
+everything else subscribes. Every version of this that ignored that rule broke in a way
+that took hours to find.
